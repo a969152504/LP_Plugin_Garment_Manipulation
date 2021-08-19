@@ -80,3 +80,12 @@ DEPENDPATH += $$PWD/../../../librealsense-master/include/librealsense2
 
 INCLUDEPATH += $$PWD/../../../librealsense-master/examples
 DEPENDPATH += $$PWD/../../../librealsense-master/examples
+
+unix:!macx: LIBS += -L$$PWD/../../../bullet3/build_cmake/install/lib/ \
+    -lBulletSoftBody \
+    -lBulletCollision \
+    -lBulletDynamics \
+    -lBulletRobotics
+
+INCLUDEPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
+DEPENDPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
