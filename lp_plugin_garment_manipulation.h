@@ -6,7 +6,6 @@
 #include "plugin/lp_actionplugin.h"
 
 #include <QObject>
-#include "extern/geodesic/geodesic_algorithm_exact.h"
 #include <QOpenGLBuffer>
 #include <QCheckBox>
 #include <QVector2D>
@@ -22,12 +21,14 @@
 #include "opencv2/calib3d.hpp"
 
 #include <librealsense2/rs.hpp>
+#include <librealsense2/rsutil.h>
 
 #include <math.h>
 #include <QProcess>
 #include <QFile>
 #include <QTextStream>
 #include <QThread>
+#include <QPushButton>
 
 class QLabel;
 class LP_ObjectImpl;
@@ -54,7 +55,11 @@ public:
         bool Run() override;
         bool eventFilter(QObject *watched, QEvent *event) override;
         bool saveCameraParams(const std::string &filename, cv::Size imageSize, float aspectRatio, int flags,
-                                     const cv::Mat &cameraMatrix, const cv::Mat &distCoeffs, double totalAvgErr);
+                              const cv::Mat &cameraMatrix, const cv::Mat &distCoeffs, double totalAvgErr);
+
+        // LP_ActionPlugin interface
+        QString MenuName();
+        QAction *Trigger();
 
 signals:
 
@@ -70,8 +75,13 @@ public slots:
 private:
         bool mInitialized_L = false;
         bool mInitialized_R = false;
+        bool gCameraDisplay = true;
+        bool mRunCollectData = false;
+        bool mCalAveragePoint = false;
+        bool gFindBackground = false;
         std::shared_ptr<QWidget> mWidget;
         QLabel *mLabel = nullptr;
+        QPushButton *mbutton1 = nullptr;
         QOpenGLShaderProgram *mProgram_L = nullptr,
                              *mProgram_R = nullptr;
 
@@ -85,20 +95,15 @@ private:
         // Frames returned by our pipeline, they will be packed in this structure
         rs2::frameset frames;
 
-        std::vector<QVector3D> mPointCloud, mPointCloudColor, mPointCloudCopy, mTestP;
+        std::vector<QVector3D> mPointCloud, mPointCloudColor, mGraspP, mReleaseP, mTestP;
         std::vector<QVector2D> mPointCloudTex;
 
-private:
         /**
          * @brief initializeGL initalize any OpenGL resource
          */
 void initializeGL_L();
 void initializeGL_R();
 
-// LP_ActionPlugin interface
-public:
-    QString MenuName();
-    QAction *Trigger();
 };
 
 

@@ -6,6 +6,8 @@
 #include "renderer/lp_glrenderer.h"
 
 #include <math.h>
+#include <fstream>
+#include <filesystem>
 #include <example.hpp>
 
 #include <QVBoxLayout>
@@ -17,19 +19,35 @@
 #include <QMatrix4x4>
 #include <QPushButton>
 #include <QtConcurrent/QtConcurrent>
+#include <QFileDialog>
+
+/**
+ * @brief BulletPhysics Headers
+ */
+//#include <BulletSoftBody/btSoftBody.h>
+//#include <Bullet3Dynamics/b3CpuRigidBodyPipeline.h>
+
+
 
 double pi = M_PI;
-cv::Mat gCamimage;
+cv::Mat gCamimage, Src, warped_image, background;
+cv::Matx33f WarpMatrix;
+cv::Size warped_image_size;
 rs2::pointcloud pc;
 rs2::points points;
-int depthw, depthh;
-int thresh = 70, frame = 0;
+rs2::device dev;
+rs2_intrinsics depth_i, color_i;
+rs2_extrinsics d2c_e, c2d_e;
+float depth_scale;
+int srcw, srch, depthw, depthh, imageWidth, imageHeight, graspp;
+double averagegp;
+int thresh = 70, frame = 0, markercount = 0, datanumber = 0, acount = 0;
 cv::RNG rng(12345);
 void Robot_Plan(int, void* );
 cv::Mat cameraMatrix, distCoeffs;
 std::vector<cv::Vec3d> rvecs, tvecs;
-std::vector<cv::Point2f> roi_corners(4);
-std::vector<float> trans(5), markercenter(2);
+std::vector<cv::Point2f> roi_corners(4), midpoints(4), dst_corners(4);
+std::vector<float> trans(3), markercenter(2);
 cv::Ptr<cv::aruco::Dictionary> dictionary;
 QMatrix4x4 depthtrans, depthinvtrans, depthrotationsx, depthrotationsy, depthrotationszx, depthrotationsinvzx, depthrotationszy, depthrotationsinvzy;
 
@@ -118,14 +136,14 @@ LP_Plugin_Garment_Manipulation::~LP_Plugin_Garment_Manipulation()
     for(int i=0; i<4; i++){
         roi_corners[i].x = 0;
         roi_corners[i].y = 0;
+        midpoints[i].x = 0;
+        midpoints[i].y = 0;
+        dst_corners[i].x = 0;
+        dst_corners[i].y = 0;
     }
-    for(int i=0; i<5; i++){
+    for(int i=0; i<3; i++){
         trans[i] = 0;
     }
-    frame = 0;
-    gStopFindWorkspace = false;
-    gPlan = false;
-    gQuit = false;
     gCurrentGLFrame = gNullImage;
     gEdgeImage = gNullImage;
     gWarpedImage = gNullImage;
@@ -137,7 +155,7 @@ QWidget *LP_Plugin_Garment_Manipulation::DockUi()
     mWidget = std::make_shared<QWidget>();
     QVBoxLayout *layout = new QVBoxLayout(mWidget.get());
 
-    mLabel = new QLabel("");
+    mLabel = new QLabel("Right click to find the workspace");
 
     layout->addWidget(mLabel);
 
@@ -155,11 +173,21 @@ public:
 
 bool LP_Plugin_Garment_Manipulation::Run()
 {
+    srand((unsigned)time(NULL));
+    datanumber = 0;
+    frame = 0;
+    markercount = 0;
+    gStopFindWorkspace = false;
+    gPlan = false;
+    gQuit = false;
+    mCalAveragePoint = false;
+    gFindBackground = false;
+
     //calibrate();
     //return false;
 
-    pipe.start();
-
+    rs2::pipeline_profile profile = pipe.start();
+    dev = profile.get_device();
 
     // Data for camera 105
     cameraMatrix = (cv::Mat_<double>(3, 3) <<
@@ -190,34 +218,42 @@ bool LP_Plugin_Garment_Manipulation::Run()
     dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100);
 
 
-    gFuture = QtConcurrent::run([this](){
+    gFuture = QtConcurrent::run([this](){        
+
+//        int countx = 0;
+//        int county = 360;
 
         while(!gQuit)
         {
             // Wait for frames and get them as soon as they are ready
             frames = pipe.wait_for_frames();
 
-
             // Our rgb frame
             rs2::frame rgb = frames.get_color_frame();
-
+            pc.map_to(rgb);
 
             // Let's get our depth frame
             auto depth = frames.get_depth_frame();
             depthw = depth.get_width();
             depthh = depth.get_height();
 
+            // Device information
+            depth_i = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
+            color_i = rgb.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
+            d2c_e = depth.get_profile().as<rs2::video_stream_profile>().get_extrinsics_to(rgb.get_profile());
+            c2d_e = rgb.get_profile().as<rs2::video_stream_profile>().get_extrinsics_to(depth.get_profile());
+            rs2::depth_sensor ds = dev.query_sensors().front().as<rs2::depth_sensor>();
+            depth_scale = ds.get_depth_scale();
+        //                float fx=i.fx, fy=i.fy, cx=i.ppx, cy=i.ppy, distC1 = j.coeffs[0], distC2 = j.coeffs[1], distC3 = j.coeffs[2], distC4 = j.coeffs[3], distC5 = j.coeffs[4];
+        //                qDebug()<< "fx: "<< fx << "fy: "<< fy << "cx: "<< cx << "cy: "<< cy << "coeffs: "<< distC1 << " "<< distC2 << " "<< distC3 << " "<< distC4 << " "<< distC5;
+        //                QMatrix4x4 K = {fx,   0.0f,   cx, 0.0f,
+        //                                0.0f,   fy,   cy, 0.0f,
+        //                                0.0f, 0.0f, 1.0f, 0.0f,
+        //                                0.0f, 0.0f, 0.0f, 0.0f};
+
             // Generate the pointcloud and texture mappings
             points = pc.calculate(depth);
             auto vertices = points.get_vertices();
-            std::vector<rs2::vertex> vertices_shifted(points.size());
-            for(int i=5; i<depthh; i++){ //Shift the points for some pixels
-                for(int j=0; j<depthw-35; j++){
-                    vertices_shifted[(i-5)*depthw+j].x = vertices[i*depthw+j+35].x;
-                    vertices_shifted[(i-5)*depthw+j].y = vertices[i*depthw+j+35].y;
-                    vertices_shifted[(i-5)*depthw+j].z = vertices[i*depthw+j+35].z;
-                }
-            }
 
             // Let's convert them to QImage
             auto q_rgb = realsenseFrameToQImage(rgb);
@@ -227,6 +263,9 @@ bool LP_Plugin_Garment_Manipulation::Run()
 
 //            qDebug()<< "depthw: "<< depthw <<"depthh: " << depthh<< "q_rgbh: "<<q_rgb.height()<<"q_rgbw: "<<q_rgb.width();
 
+            srcw = camimage.cols;
+            srch = camimage.rows;
+
             camimage.copyTo(gCamimage);
 
             std::vector<int> ids;
@@ -234,6 +273,7 @@ bool LP_Plugin_Garment_Manipulation::Run()
             cv::Ptr<cv::aruco::DetectorParameters> params = cv::aruco::DetectorParameters::create();
             params->cornerRefinementMethod = cv::aruco::CORNER_REFINE_CONTOUR;
             cv::aruco::detectMarkers(camimage, dictionary, corners, ids, params);
+
 
             // if at least one marker detected
             if (ids.size() > 0) {
@@ -243,109 +283,113 @@ bool LP_Plugin_Garment_Manipulation::Run()
                 cv::aruco::estimatePoseSingleMarkers(corners, 0.041, cameraMatrix, distCoeffs, rvecs, tvecs);
 
                 // Get location of the table
-                if (ids[0] == 97 && frame<=100){
-                    std::vector< cv::Point3f> table_corners_3d;
-                    std::vector< cv::Point2f> table_corners_2d;
-                    table_corners_3d.push_back(cv::Point3f(-0.02, 0.93,  0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.98, 0.93,  0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.98,-0.07,  0.0));
-                    table_corners_3d.push_back(cv::Point3f(-0.02,-0.07,  0.0));
-                    cv::projectPoints(table_corners_3d, rvecs[0], tvecs[0], cameraMatrix, distCoeffs, table_corners_2d);
-                    roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
-                    roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
-                    roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
-                    roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
-                    roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
-                    roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
-                    roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
-                    roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
-                    frame = frame + 1;
-                } else if (ids[0] == 98 && frame<=100){
-                    std::vector< cv::Point3f> table_corners_3d;
-                    std::vector< cv::Point2f> table_corners_2d;
-                    table_corners_3d.push_back(cv::Point3f(-0.02,-0.05,  0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.98,-0.05,  0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.98,-0.95,  0.0));
-                    table_corners_3d.push_back(cv::Point3f(-0.02,-0.95,  0.0));
-                    cv::projectPoints(table_corners_3d, rvecs[0], tvecs[0], cameraMatrix, distCoeffs, table_corners_2d);
-                    roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
-                    roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
-                    roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
-                    roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
-                    roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
-                    roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
-                    roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
-                    roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
-                    frame = frame + 1;
-                } else if (ids[0] == 99 && frame<=100){
-                    std::vector< cv::Point3f> table_corners_3d;
-                    std::vector< cv::Point2f> table_corners_2d;
-                    table_corners_3d.push_back(cv::Point3f(-0.98, 0.06, 0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.02, 0.06, 0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.02,-0.94, 0.0));
-                    table_corners_3d.push_back(cv::Point3f(-0.98,-0.94, 0.0));
-                    cv::projectPoints(table_corners_3d, rvecs[0], tvecs[0], cameraMatrix, distCoeffs, table_corners_2d);
-                    roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
-                    roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
-                    roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
-                    roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
-                    roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
-                    roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
-                    roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
-                    roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
-                    frame = frame + 1;
-                } else if (ids[0] == 0 && frame<=100){
-                    std::vector< cv::Point3f> table_corners_3d;
-                    std::vector< cv::Point2f> table_corners_2d;
-                    table_corners_3d.push_back(cv::Point3f(-0.53,-0.02, 0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.47,-0.02, 0.0));
-                    table_corners_3d.push_back(cv::Point3f( 0.47,-0.98, 0.0));
-                    table_corners_3d.push_back(cv::Point3f(-0.53,-0.98, 0.0));
-                    cv::projectPoints(table_corners_3d, rvecs[0], tvecs[0], cameraMatrix, distCoeffs, table_corners_2d);
-                    roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
-                    roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
-                    roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
-                    roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
-                    roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
-                    roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
-                    roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
-                    roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
-                    frame = frame + 1;
-                }
-
                     std::vector<int> detected_markers(3);
 
                     // draw axis for each marker
                     for(auto i=0; i<ids.size(); i++){
                         cv::aruco::drawAxis(camimage, cameraMatrix, distCoeffs, rvecs[i], tvecs[i], 0.1);
-                        if(ids.size() >= 3 && frame<200){
+                        if(markercount<=200 && !gStopFindWorkspace){
                             if(ids[i] == 97){
                                 detected_markers[0] = 97;
+                                std::vector< cv::Point3f> table_corners_3d;
+                                std::vector< cv::Point2f> table_corners_2d;
+                                table_corners_3d.push_back(cv::Point3f(-0.02, 0.94,  0.0));
+                                table_corners_3d.push_back(cv::Point3f( 0.98, 0.94,  0.0));
+                                table_corners_3d.push_back(cv::Point3f( 0.98,-0.06,  0.0));
+                                table_corners_3d.push_back(cv::Point3f(-0.02,-0.06,  0.0));
+                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+                                roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
+                                roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
+                                roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
+                                roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
+                                roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
+                                roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
+                                roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
+                                roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
+                                markercount = markercount + 1;
                             } else if (ids[i] == 98){
                                 detected_markers[1] = 98;
+//                                std::vector< cv::Point3f> table_corners_3d;
+//                                std::vector< cv::Point2f> table_corners_2d;
+//                                table_corners_3d.push_back(cv::Point3f(-0.02, 0.045,  0.0));
+//                                table_corners_3d.push_back(cv::Point3f( 0.98, 0.045,  0.0));
+//                                table_corners_3d.push_back(cv::Point3f( 0.98,-0.955,  0.0));
+//                                table_corners_3d.push_back(cv::Point3f(-0.02,-0.955,  0.0));
+//                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+//                                roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
+//                                roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
+//                                roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
+//                                roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
+//                                roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
+//                                roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
+//                                roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
+//                                roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
+//                                markercount = markercount + 1;
                             } else if (ids[i] == 99){
-                                detected_markers[2] = 99;
+//                                std::vector< cv::Point3f> table_corners_3d;
+//                                std::vector< cv::Point2f> table_corners_2d;
+//                                table_corners_3d.push_back(cv::Point3f(-0.98, 0.04, 0.0));
+//                                table_corners_3d.push_back(cv::Point3f( 0.02, 0.04, 0.0));
+//                                table_corners_3d.push_back(cv::Point3f( 0.02,-0.96, 0.0));
+//                                table_corners_3d.push_back(cv::Point3f(-0.98,-0.96, 0.0));
+//                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+//                                roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
+//                                roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
+//                                roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
+//                                roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
+//                                roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
+//                                roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
+//                                roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
+//                                roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
+//                                markercount = markercount + 1;
+                            } else if (ids[i] == 0){
+                                detected_markers[2] = 0;
+//                                std::vector< cv::Point3f> table_corners_3d;
+//                                std::vector< cv::Point2f> table_corners_2d;
+//                                table_corners_3d.push_back(cv::Point3f(-0.52, 0.02, 0.0));
+//                                table_corners_3d.push_back(cv::Point3f( 0.48, 0.02, 0.0));
+//                                table_corners_3d.push_back(cv::Point3f( 0.48,-0.98, 0.0));
+//                                table_corners_3d.push_back(cv::Point3f(-0.52,-0.98, 0.0));
+//                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+//                                roi_corners[0].x = roi_corners[0].x + table_corners_2d[0].x;
+//                                roi_corners[0].y = roi_corners[0].y + table_corners_2d[0].y;
+//                                roi_corners[1].x = roi_corners[1].x + table_corners_2d[1].x;
+//                                roi_corners[1].y = roi_corners[1].y + table_corners_2d[1].y;
+//                                roi_corners[2].x = roi_corners[2].x + table_corners_2d[2].x;
+//                                roi_corners[2].y = roi_corners[2].y + table_corners_2d[2].y;
+//                                roi_corners[3].x = roi_corners[3].x + table_corners_2d[3].x;
+//                                roi_corners[3].y = roi_corners[3].y + table_corners_2d[3].y;
+//                                markercount = markercount + 1;
+                            }
+                            if(markercount >= 200){
+                                qDebug()<< "Alignment Done";
                             }
                         }
                     }
 
-                    if(detected_markers[0] == 97 && detected_markers[1] == 98 && detected_markers[2] == 99 && frame<=100){
+                    if(detected_markers[0] == 97 && detected_markers[1] == 98 && detected_markers[2] == 0 && frame <= 200){
                         for(auto i=0; i<ids.size(); i++){
                             if(ids[i] == 97){
                                 for(auto j=i; j<ids.size(); j++){
                                     if(ids[j] == 98){
                                         for(auto k=j; k<ids.size(); k++){
-                                            if(ids[k] == 99){
-                                                markercenter[0] = corners[j][0].x*depthw/1280;//(corners[0][0].x + corners[0][1].x + corners[0][2].x + corners[0][3].x)/4*depthw/1280;
-                                                markercenter[1] = corners[j][0].y*depthh/720;//(corners[0][0].y + corners[0][1].y + corners[0][2].y + corners[0][3].y)/4*depthh/720;
+                                            if(ids[k] == 0){
+                                                frame = frame+1;
 
-                                                trans[0] = /*trans[0]*(frame-1) +*/ vertices_shifted[(int)markercenter[1]*depthw+(int)markercenter[0]].z;
-                                                trans[1] = trans[1]*(frame-1) - atan((vertices_shifted[(int)corners[k][0].x*848/1280+(int)corners[k][0].y*480/720*depthw].z - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].z) / (vertices_shifted[(int)corners[k][0].x*848/1280+(int)corners[k][0].y*480/720*depthw].y - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].y));
-                                                trans[2] = trans[2]*(frame-1) - atan((vertices_shifted[(int)corners[i][0].x*848/1280+(int)corners[i][0].y*480/720*depthw].z - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].z) / (vertices_shifted[(int)corners[i][0].x*848/1280+(int)corners[i][0].y*480/720*depthw].x - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].x));
-                                                trans[3] = trans[3]*(frame-1) + atan((vertices_shifted[(int)corners[k][0].x*848/1280+(int)corners[k][0].y*480/720*depthw].x - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].x) / (vertices_shifted[(int)corners[k][0].x*848/1280+(int)corners[k][0].y*480/720*depthw].y - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].y));
-                                                trans[4] = trans[4]*(frame-1) + atan((vertices_shifted[(int)corners[i][0].x*848/1280+(int)corners[i][0].y*480/720*depthw].y - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].y) / (vertices_shifted[(int)corners[i][0].x*848/1280+(int)corners[i][0].y*480/720*depthw].x - vertices_shifted[(int)corners[j][0].x*848/1280+(int)corners[j][0].y*480/720*depthw].x));
+                                                markercenter[0] = corners[j][0].x;
+                                                markercenter[1] = corners[j][0].y;
 
-                                                for(int l=1; l<5; l++){
+                                                float tmp_depth_point[2] = {0}, tmp_depth_pointi[2] = {0}, tmp_depth_pointj[2] = {0}, tmp_depth_pointk[2] = {0}, tmp_color_point[2] = {markercenter[0], markercenter[1]}, tmp_color_pointi[2] = {corners[i][0].x, corners[i][0].y}, tmp_color_pointj[2] = {corners[j][0].x, corners[j][0].y}, tmp_color_pointk[2] = {corners[k][0].x, corners[k][0].y};
+                                                rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
+                                                rs2_project_color_pixel_to_depth_pixel(tmp_depth_pointi, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_pointi);
+                                                rs2_project_color_pixel_to_depth_pixel(tmp_depth_pointj, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_pointj);
+                                                rs2_project_color_pixel_to_depth_pixel(tmp_depth_pointk, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_pointk);
+
+                                                trans[0] = trans[0]*(frame-1) + vertices[(int)tmp_depth_point[0]+(int)tmp_depth_point[1]*depthw].z;
+                                                trans[1] = trans[1]*(frame-1) - atan((vertices[(int)tmp_depth_pointk[0]+(int)tmp_depth_pointk[1]*depthw].z - vertices[(int)tmp_depth_pointj[0]+(int)tmp_depth_pointj[1]*depthw].z) / (vertices[(int)tmp_depth_pointk[0]+(int)tmp_depth_pointk[1]*depthw].y - vertices[(int)tmp_depth_pointj[0]+(int)tmp_depth_pointj[1]*depthw].y));
+                                                trans[2] = trans[2]*(frame-1) - atan((vertices[(int)tmp_depth_pointi[0]+(int)tmp_depth_pointi[1]*depthw].z - vertices[(int)tmp_depth_pointj[0]+(int)tmp_depth_pointj[1]*depthw].z) / (vertices[(int)tmp_depth_pointi[0]+(int)tmp_depth_pointi[1]*depthw].x - vertices[(int)tmp_depth_pointj[0]+(int)tmp_depth_pointj[1]*depthw].x));
+
+                                                for(int l=0; l<3; l++){
                                                     trans[l] = trans[l]/frame;
                                                 }
                                                 break;
@@ -355,23 +399,24 @@ bool LP_Plugin_Garment_Manipulation::Run()
                                 }
                             }
                         }
-                    }
-
+                    }              
 
 
 //                    qDebug() <<"t1: "<< trans[1]<<"t2: "<< trans[2]<<"t3: "<< trans[3]<<"t4: "<< trans[4];
 //                    qDebug()<< "mx: "<< markercenter[0]<<"my: "<<markercenter[1]<<"app: "<<markercenter[1]*depthw+markercenter[0];
 //                    qDebug()<<"apx: "<<ap[(int)markercenter[1]*depthw+(int)markercenter[0]].x<<"apy: "<<ap[(int)markercenter[1]*depthw+(int)markercenter[0]].y<<"apz: "<< ap[(int)markercenter[1]*depthw+(int)markercenter[0]].z;
+                    float depth_point[2] = {0}, color_point[2] = {markercenter[0], markercenter[1]};
+                    rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
 
-                    depthtrans = {1.0f, 0.0f, 0.0f, -vertices_shifted[(int)markercenter[1]*depthw+(int)markercenter[0]].x,
-                                  0.0f, 1.0f, 0.0f,  vertices_shifted[(int)markercenter[1]*depthw+(int)markercenter[0]].y,
-                                  0.0f, 0.0f, 1.0f,                                                              trans[0],
-                                  0.0f, 0.0f, 0.0f,                                                                  1.0f};
+                    depthtrans = {1.0f, 0.0f, 0.0f, -vertices[(int)depth_point[1]*depthw+(int)depth_point[0]].x,
+                                  0.0f, 1.0f, 0.0f,  vertices[(int)depth_point[1]*depthw+(int)depth_point[0]].y,
+                                  0.0f, 0.0f, 1.0f,                                                     trans[0],
+                                  0.0f, 0.0f, 0.0f,                                                         1.0f};
 
-                    depthinvtrans = {1.0f, 0.0f, 0.0f,  vertices_shifted[(int)markercenter[1]*depthw+(int)markercenter[0]].x,
-                                     0.0f, 1.0f, 0.0f, -vertices_shifted[(int)markercenter[1]*depthw+(int)markercenter[0]].y,
-                                     0.0f, 0.0f, 1.0f,                                                                  0.0f,
-                                     0.0f, 0.0f, 0.0f,                                                                  1.0f};
+                    depthinvtrans = {1.0f, 0.0f, 0.0f,  vertices[(int)depth_point[1]*depthw+(int)depth_point[0]].x,
+                                     0.0f, 1.0f, 0.0f, -vertices[(int)depth_point[1]*depthw+(int)depth_point[0]].y,
+                                     0.0f, 0.0f, 1.0f,                                                         0.0f,
+                                     0.0f, 0.0f, 0.0f,                                                          1.0f};
 
                     depthrotationsx = {1.0f,          0.0f,           0.0f, 0.0f,
                                        0.0f, cos(trans[1]), -sin(trans[1]), 0.0f,
@@ -382,48 +427,42 @@ bool LP_Plugin_Garment_Manipulation::Run()
                                                  0.0f, 1.0f,          0.0f, 0.0f,
                                        -sin(trans[2]), 0.0f, cos(trans[2]), 0.0f,
                                                  0.0f, 0.0f,          0.0f, 1.0f};
-
-                    depthrotationszx = { cos(trans[3]), -sin(trans[3]), 0.0f, 0.0f,
-                                         sin(trans[3]),  cos(trans[3]), 0.0f, 0.0f,
-                                                  0.0f,           0.0f, 1.0f, 0.0f,
-                                                  0.0f,           0.0f, 0.0f, 1.0f};
-
-                    depthrotationsinvzx = { cos(-trans[3]), -sin(-trans[3]), 0.0f, 0.0f,
-                                            sin(-trans[3]),  cos(-trans[3]), 0.0f, 0.0f,
-                                                      0.0f,            0.0f, 1.0f, 0.0f,
-                                                      0.0f,            0.0f, 0.0f, 1.0f};
-
-                    depthrotationszy = { cos(trans[4]), -sin(trans[4]), 0.0f, 0.0f,
-                                         sin(trans[4]),  cos(trans[4]), 0.0f, 0.0f,
-                                                  0.0f,           0.0f, 1.0f, 0.0f,
-                                                  0.0f,           0.0f, 0.0f, 1.0f};
-
-                    depthrotationsinvzy = { cos(-trans[4]), -sin(-trans[4]), 0.0f, 0.0f,
-                                            sin(-trans[4]),  cos(-trans[4]), 0.0f, 0.0f,
-                                                      0.0f,            0.0f, 1.0f, 0.0f,
-                                                      0.0f,            0.0f, 0.0f, 1.0f};
                 }
+
                 // Draw PointCloud
                 mPointCloud.resize(depthw * depthh);
                 mPointCloudTex.resize(depthw * depthh);
 
+                auto tex_coords = points.get_texture_coordinates(); // and texture coordinates
+
                 for ( int i=0; i<depthw; ++i ){
                     for ( int j=0; j<depthh; ++j ){
-                        if (vertices_shifted[(depthh-j)*depthw-(depthw-i)].z){
-                            //mPointCloud[i*depthh + j] = QVector3D(i * 0.01, (depthh - j) * 0.01, -depth.get_distance(i, j));
-                            mPointCloud[i*depthh + j] = QVector3D(vertices_shifted[(depthh-j)*depthw-(depthw-i)].x, -vertices_shifted[(depthh-j)*depthw-(depthw-i)].y, -vertices_shifted[(depthh-j)*depthw-(depthw-i)].z);
-                            mPointCloudTex[i*depthh + j] = QVector2D((float)(i)/(depthw), (float)(depthh-j)/(depthh));
+                        if (vertices[(depthh-j)*depthw-(depthw-i)].z){
+                            mPointCloud[i*depthh + j] = QVector3D(vertices[(depthh-j)*depthw-(depthw-i)].x, -vertices[(depthh-j)*depthw-(depthw-i)].y, -vertices[(depthh-j)*depthw-(depthw-i)].z);
+                            mPointCloudTex[i*depthh + j] = QVector2D(tex_coords[(depthh-j)*depthw-(depthw-i)].u, tex_coords[(depthh-j)*depthw-(depthw-i)].v);
                             if(ids.size() > 0){
-                                mPointCloud[i*depthh + j] = /*depthinvtrans **/ depthrotationsinvzy * depthrotationsy * depthrotationszy * depthrotationsinvzx * depthrotationsx * depthrotationszx * depthtrans * mPointCloud[i*depthh + j];
+                                mPointCloud[i*depthh + j] = depthinvtrans * depthrotationsy * depthrotationsx * depthtrans * mPointCloud[i*depthh + j];
                             }
                         }
                     }
                 }
 
+//                float depth_point1[2] = {0}, color_point1[2] = {corners[0][0].x, corners[0][0].y};
+//                rs2_project_color_pixel_to_depth_pixel(depth_point1, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point1);
+//                qDebug() << "97: " <<mPointCloud[(int)depth_point1[0]*depthh+(depthh - (int)depth_point1[1])].z();
 
+//                float depth_point2[2] = {0}, color_point2[2] = {corners[1][0].x, corners[1][0].y};
+//                rs2_project_color_pixel_to_depth_pixel(depth_point2, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point2);
+//                qDebug() << "98: " <<mPointCloud[(int)depth_point2[0]*depthh+(depthh - (int)depth_point2[1])].z();
+
+//                float depth_point3[2] = {0}, color_point3[2] = {corners[3][0].x, corners[3][0].y};
+//                rs2_project_color_pixel_to_depth_pixel(depth_point3, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point3);
+//                qDebug() << "0: " <<mPointCloud[(int)depth_point3[0]*depthh+(depthh - (int)depth_point3[1])].z();
+
+                // Test point
 //                cv::Point2f ball;
-//                ball.x = 0;
-//                ball.y = 0;
+//                ball.x = 200;
+//                ball.y = 500;
 
 //                cv::circle( camimage,
 //                            ball,
@@ -431,6 +470,34 @@ bool LP_Plugin_Garment_Manipulation::Run()
 //                            cv::Scalar( 0, 0, 255 ),
 //                            cv::FILLED,
 //                            cv::LINE_8 );
+
+
+//                float depth_point[2] = {0}, color_point[2] = {ball.x, ball.y};
+//                rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+//                int P = int(depth_point[0])*depthh + (depthh-int(depth_point[1]));
+
+//                qDebug()<< "resultx: "<<result.x << "resulty: " << result.y << "resultx2: "<< result2[0] << "resulty2: "<< result2[1] << "P: "<< P;
+//                qDebug()<< "resultx: "<<result.x/srcw << "resulty: " << result.y/srch;
+//                qDebug()<< "depth_point: "<< depth_point[0]/depthw<< " "<< depth_point[1]/depthh;
+
+//                assert(P < mPointCloud.size());
+//                qDebug() << ball.x / srcw << ", " << ball.y / srch << ":" << result.x / depthw << ", " << result.y / depthh ;
+//                qDebug() << "texcorx: " << mPointCloudTex[P].x() << "texcory: "<< mPointCloudTex[P].y() << "\n";
+
+//                assert(depthh*depthw == mPointCloud.size());
+
+//                mTestP.resize(1);
+//                mTestP[0] = mPointCloud[P];
+//                countx = countx + 2;
+//                if(countx == 1280){
+//                    county = county + 1;
+//                    countx = 0;
+//                }
+
+                if(mCalAveragePoint && acount<100){
+                    averagegp = averagegp + mPointCloud[graspp].z();
+                    acount++;
+                }
 
                 // And finally we'll emit our signal
                 gLock.lockForWrite();
@@ -448,20 +515,24 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
         auto e = static_cast<QMouseEvent*>(event);
 
         if ( e->button() == Qt::RightButton ){
-            if (frame==0){
+            if (markercount==0){
                 qDebug("No marker data!");
+            } else if (!gFindBackground){
+                roi_corners[0].x = round(roi_corners[0].x / markercount);
+                roi_corners[0].y = round(roi_corners[0].y / markercount);
+                roi_corners[1].x = round(roi_corners[1].x / markercount);
+                roi_corners[1].y = round(roi_corners[1].y / markercount);
+                roi_corners[2].x = round(roi_corners[2].x / markercount);
+                roi_corners[2].y = round(roi_corners[2].y / markercount);
+                roi_corners[3].x = round(roi_corners[3].x / markercount);
+                roi_corners[3].y = round(roi_corners[3].y / markercount);
+                Robot_Plan( 0, 0 );
+                gFindBackground = true;
+                mLabel->setText("Right click to plan");
             } else if (!gStopFindWorkspace) {
                 gStopFindWorkspace = true;
-                roi_corners[0].x = round(roi_corners[0].x / frame);
-                roi_corners[0].y = round(roi_corners[0].y / frame);
-                roi_corners[1].x = round(roi_corners[1].x / frame);
-                roi_corners[1].y = round(roi_corners[1].y / frame);
-                roi_corners[2].x = round(roi_corners[2].x / frame);
-                roi_corners[2].y = round(roi_corners[2].y / frame);
-                roi_corners[3].x = round(roi_corners[3].x / frame);
-                roi_corners[3].y = round(roi_corners[3].y / frame);
-                mPointCloudCopy = mPointCloud;
                 Robot_Plan( 0, 0 );
+                mLabel->setText("Right click to get the garment");
             } else if (!gPlan) {
                 gPlan = true;
                 QProcess *openrviz, *plan = new QProcess();
@@ -475,15 +546,88 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
                 Sleeper::sleep(3);
 
                 plan->startDetached("xterm", planarg);
+                mLabel->setText("Right click to collect data");
             } else if (gPlan) {
-                Robot_Plan(0, 0);
+                mLabel->setText("Press SPACE to quit");
+                if ( !mRunCollectData ) {
+                    mRunCollectData = true;
+                    auto future = QtConcurrent::run([this](){
+                        while(mRunCollectData){
+                            Robot_Plan(0, 0);
 
-                QProcess *unfold = new QProcess();
-                QStringList unfoldarg;
+                            QProcess *unfold = new QProcess();
+                            QStringList unfoldarg;
 
-                unfoldarg << "/home/cpii/projects/scripts/unfold.sh";
+                            unfoldarg << "/home/cpii/projects/scripts/unfold.sh";
 
-                unfold->startDetached("xterm", unfoldarg);
+                            unfold->startDetached("xterm", unfoldarg);
+
+                            Sleeper::sleep(40);
+
+                            // Save data
+                            gCamimage.copyTo(Src);
+                            cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+                            cv::resize(warped_image, warped_image, cv::Size(500,500));
+                            warped_image = background - warped_image;
+                            std::vector<std::string> points;
+                            for (auto i=0; i<mPointCloud.size(); i++){
+                                points.push_back(std::to_string(mPointCloud[i].z()));
+                            }
+                            std::vector<cv::Point2f> OriTablePoints;
+                            for(int i=0; i<warped_image.cols; i++){
+                                for(int j=0; j<warped_image.rows; j++){
+                                    cv::Point2f warpedp = cv::Point2f(i/static_cast<float>(imageWidth)*warped_image_size.width, j/static_cast<float>(imageHeight)*warped_image_size.height);
+                                    cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+                                    float color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+                                    OriTablePoints.emplace_back(cv::Point2f(color_point[0], color_point[1]));
+                                }
+                            }
+                            std::vector<std::string> tablepoints;
+                    //        mTestP.resize(OriTablePoints.size());
+                            for (int i=0; i<OriTablePoints.size(); i++){
+                                float tmp_depth_point[2] = {0}, tmp_color_point[2] = {OriTablePoints[i].x, OriTablePoints[i].y};
+                                auto depth = frames.get_depth_frame();
+                                rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
+                                int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
+                    //            mTestP[i] = mPointCloud[tmpTableP];
+                                tablepoints.push_back(std::to_string(mPointCloud[tmpTableP].z()));
+                            }
+
+                            // Save points
+                            QString filename_points = QString("/home/cpii/projects/data/%1/after_points.txt").arg(datanumber);
+                            QByteArray filename_pointsc = filename_points.toLocal8Bit();
+                            const char *filename_pointscc = filename_pointsc.data();
+                            std::ofstream output_file(filename_pointscc);
+                            std::ostream_iterator<std::string> output_iterator(output_file, "\n");
+                            std::copy(points.begin(), points.end(), output_iterator);
+
+                            // Save table points
+                            QString filename_tablepoints = QString("/home/cpii/projects/data/%1/after_tablepoints.txt").arg(datanumber);
+                            QByteArray filename_tablepointsc = filename_tablepoints.toLocal8Bit();
+                            const char *filename_tablepointscc = filename_tablepointsc.data();
+                            std::ofstream output_file2(filename_tablepointscc);
+                            std::ostream_iterator<std::string> output_iterator2(output_file2, "\n");
+                            std::copy(tablepoints.begin(), tablepoints.end(), output_iterator2);
+
+                            // Save Src
+                            QString filename_Src = QString("/home/cpii/projects/data/%1/after_Src.jpg").arg(datanumber);
+                            QByteArray filename_Srcc = filename_Src.toLocal8Bit();
+                            const char *filename_Srccc = filename_Srcc.data();
+                            cv::imwrite(filename_Srccc, Src);
+
+                            // Save warped image
+                            QString filename_warped = QString("/home/cpii/projects/data/%1/after_warped_image.jpg").arg(datanumber);
+                            QByteArray filename_warpedc = filename_warped.toLocal8Bit();
+                            const char *filename_warpedcc = filename_warpedc.data();
+                            cv::imwrite(filename_warpedcc, warped_image);
+
+                            datanumber++;
+                        }
+                        qDebug() << "Quit CollectData()";
+                    });
+                } else {
+                    qDebug() << "Collecting Data, press SPACE to stop";
+                }
             }
         }
     } else if ( QEvent::KeyRelease == event->type()){
@@ -491,6 +635,7 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
 
         if ( e->key() == Qt::Key_Space ){
             if (gStopFindWorkspace && gPlan){
+                mRunCollectData = false;
                 QProcess *exit = new QProcess();
                 QStringList exitarg;
                 exitarg << "/home/cpii/projects/scripts/exit.sh";
@@ -670,9 +815,8 @@ void LP_Plugin_Garment_Manipulation::calibrate()
 
 void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 {
-    if(!gPlan){
+    if(!gFindBackground){
         // Find the table
-        std::vector<cv::Point2f> midpoints(4), dst_corners(4);
         midpoints[0] = (roi_corners[0] + roi_corners[1]) / 2;
         midpoints[1] = (roi_corners[1] + roi_corners[2]) / 2;
         midpoints[2] = (roi_corners[2] + roi_corners[3]) / 2;
@@ -685,157 +829,252 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         dst_corners[2].y = (float)norm(midpoints[0] - midpoints[2]);
         dst_corners[3].x = 0;
         dst_corners[3].y = dst_corners[2].y;
-        cv::Size warped_image_size = cv::Size(cvRound(dst_corners[2].x), cvRound(dst_corners[2].y));
-        cv::Mat WarpMatrix = cv::getPerspectiveTransform(roi_corners, dst_corners);
-        cv::Mat Src, warped_image;
-        gCamimage.copyTo(Src);
-        cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+        warped_image_size = cv::Size(cvRound(dst_corners[2].x), cvRound(dst_corners[2].y));
+        WarpMatrix = cv::getPerspectiveTransform(roi_corners, dst_corners);
+    }
 
-        gLock.lockForWrite();
-        gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
-        gLock.unlock();
-        emit glUpdateRequest();
+    cv::Mat inv_warp_image, OriginalCoordinates;
 
-        // Find contours
-        cv::Mat src_gray;
-        cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
-        cv::blur( src_gray, src_gray, cv::Size(3,3) );
+    gCamimage.copyTo(Src);
 
-        cv::Mat canny_output;
-        cv::Canny( src_gray, canny_output, thresh, thresh*2 );
-        std::vector<std::vector<cv::Point> > contours;
-        std::vector<cv::Vec4i> hierarchy;
-        cv::Point center;
-        int size = 0;
-        cv::Size sz = src_gray.size();
-        int imageWidth = sz.width;
-        int imageHeight = sz.height;
-        std::vector<double> grasp(3);
-        cv::Point grasp_point;
-        int close_point = 999;
+    cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
 
-        cv::findContours( canny_output, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
-        cv::Mat drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
-        for( size_t i = 0; i< contours.size(); i++ ){
-            cv::Scalar color = cv::Scalar( rng.uniform(0, 256), rng.uniform(0,256), rng.uniform(0,256) );
-            cv::drawContours( drawing, contours, (int)i, color, 2, cv::LINE_8, hierarchy, 0 );
+    cv::resize(warped_image, inv_warp_image, warped_image_size);
+    cv::warpPerspective(inv_warp_image, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
 
-            for (size_t j = 0; j < contours[i].size(); j++){
+    cv::resize(warped_image, warped_image, cv::Size(500,500));
+
+    if(!gFindBackground){
+        background = warped_image;
+        // Save background
+        QString filename_Src = QString("/home/cpii/projects/data/background.jpg");
+        QByteArray filename_Srcc = filename_Src.toLocal8Bit();
+        const char *filename_Srccc = filename_Srcc.data();
+        cv::imwrite(filename_Srccc, background);
+        return;
+    }
+    warped_image = background - warped_image;
+
+    gLock.lockForWrite();
+    gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
+    gLock.unlock();
+    emit glUpdateRequest();
+
+    gLock.lockForWrite();
+    gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
+    gLock.unlock();
+    emit glUpdateRequest();
+
+    // Find contours
+    cv::Mat src_gray;
+    cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
+    cv::blur( src_gray, src_gray, cv::Size(3,3) );
+
+    cv::Mat canny_output;
+    cv::Canny( src_gray, canny_output, thresh, thresh*2 );
+    std::vector<std::vector<cv::Point> > contours;
+    std::vector<cv::Vec4i> hierarchy;
+    cv::Point center;
+    int size = 0;
+    cv::Size sz = src_gray.size();
+    imageWidth = sz.width;
+    imageHeight = sz.height;
+    std::vector<double> grasp(3), release(2);
+    cv::Point grasp_point, release_point;
+    int close_point = 999;
+
+    cv::findContours( canny_output, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
+    cv::Mat drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
+
+    if (contours.size() == 0){
+        qDebug() << "No garment detected!";
+        return;
+    }
+
+    for( size_t i = 0; i< contours.size(); i++ ){
+        cv::Scalar color = cv::Scalar( rng.uniform(0, 256), rng.uniform(0,256), rng.uniform(0,256) );
+        cv::drawContours( drawing, contours, (int)i, color, 2, cv::LINE_8, hierarchy, 0 );
+
+        for (size_t j = 0; j < contours[i].size(); j++){
 //                std::cout << "\n" << i << " " << j << "Points with coordinates: x = " << contours[i][j].x << " y = " << contours[i][j].y;
 
-                if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
-                        && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
-                        || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.85), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.7), 2)) > 0.85)
-                        || (static_cast<double>(contours[i][j].x) / imageWidth > 0.95
-                        && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
-                        || (static_cast<double>(contours[i][j].x) / imageWidth < 0.05
-                        && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
-                        || (static_cast<double>(contours[i][j].x) / imageWidth > 0.475
-                        && static_cast<double>(contours[i][j].x) / imageWidth < 0.525
-                        && static_cast<double>(contours[i][j].y) / imageHeight < 0.05)){ // Filter out the robot arm and markers
-
-                        size = size - 1;
-
-                } else {
-                    center.x = center.x + contours[i][j].x;
-                    center.y = center.y + contours[i][j].y;
-                }
+            if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
+                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
+                    || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.85), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.85), 2)) > 0.85)
+                    || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
+                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                    || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
+                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                    || (static_cast<double>(contours[i][j].x) / imageWidth > 0.475
+                    && static_cast<double>(contours[i][j].x) / imageWidth < 0.525
+                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.05))
+            { // Filter out the robot arm and markers
+                    size = size - 1;
+            } else {
+                center.x = center.x + contours[i][j].x;
+                center.y = center.y + contours[i][j].y;
             }
-            size = size + contours[i].size();
         }
+        size = size + contours[i].size();
+    }
 
-        // Calculate the grasp point (Center of the cloth)
-        center.x = round(center.x/size);
-        center.y = round(center.y/size);
+    if (size == 0){
+        qDebug() << "No garment detected!";
+        return;
+    }
+
+    // Calculate the center of the cloth
+    center.x = round(center.x/size);
+    center.y = round(center.y/size);
+    //std::cout << "\n" << "grasp_pointx: " << grasp_point.x << "grasp_pointy: " << grasp_point.y;
 
 
+    if(!gPlan){
         for( size_t i = 0; i< contours.size(); i++ ){
             for (size_t j = 0; j < contours[i].size(); j++){
                 if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
                      && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
-                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.85), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.7), 2)) > 0.9)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.95
+                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.85), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.85), 2)) > 0.85)
+                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
                      && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.05
+                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
                      && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
                      || (static_cast<double>(contours[i][j].x) / imageWidth > 0.475
                      && static_cast<double>(contours[i][j].x) / imageWidth < 0.525
                      && static_cast<double>(contours[i][j].y) / imageHeight < 0.05)){ // Filter out the robot arm and markers
                 } else if (sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) < close_point){
-                          close_point = sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2));
-                          grasp_point.x = contours[i][j].x;
-                          grasp_point.y = contours[i][j].y;
-                          grasp[0] = 0.707106781*(static_cast<double>(grasp_point.y) / imageHeight) + 0.707106781*(static_cast<double>(grasp_point.x) / imageWidth) - 1.164213562;
-                          grasp[1] = 0.707106781*(static_cast<double>(grasp_point.x) / imageWidth) - 0.707106781*(static_cast<double>(grasp_point.y) / imageHeight);
+                    close_point = sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2));
+                    grasp_point.x = contours[i][j].x;
+                    grasp_point.y = contours[i][j].y;
+                    grasp[0] = 0.707106781*(static_cast<double>(grasp_point.y) / static_cast<double>(imageHeight)) + 0.707106781*(static_cast<double>(grasp_point.x) / static_cast<double>(imageWidth)) - 1.180868325;
+                    grasp[1] = 0.707106781*(static_cast<double>(grasp_point.x) / static_cast<double>(imageWidth)) - 0.707106781*(static_cast<double>(grasp_point.y) / static_cast<double>(imageHeight));
                 }
             }
         }
 
-        if (center.x == 0 && center.y == 0){
-            qDebug() << "No garment detected!";
-            return;
+//        std::vector<int> ids;
+//        std::vector<std::vector<cv::Point2f>> corners;
+//        cv::Ptr<cv::aruco::DetectorParameters> params = cv::aruco::DetectorParameters::create();
+//        params->cornerRefinementMethod = cv::aruco::CORNER_REFINE_CONTOUR;
+//        cv::aruco::detectMarkers(warped_image, dictionary, corners, ids, params);
+//        for(int i=0; i<ids.size(); i++){
+//            if(ids[i] == 81){
+//                grasp[0] = 0.707106781*(static_cast<double>(corners[i][0].y) / static_cast<double>(imageHeight)) + 0.707106781*(static_cast<double>(corners[i][0].x) / static_cast<double>(imageWidth)) - 1.180868325;
+//                grasp[1] = 0.707106781*(static_cast<double>(corners[i][0].x) / static_cast<double>(imageWidth)) - 0.707106781*(static_cast<double>(corners[i][0].y) / static_cast<double>(imageHeight));
+//                grasp_point.x = corners[i][0].x;
+//                grasp_point.y = corners[i][0].y;
+//            }
+//        }
+
+    } else {
+        int random_number = rand()%250;
+        for( size_t i = 0; i< contours.size(); i++ ){
+            for (size_t j = 0; j < contours[i].size(); j++){
+                if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
+                     && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
+                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.85), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.85), 2)) > 0.85)
+                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
+                     && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
+                     && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.475
+                     && static_cast<double>(contours[i][j].x) / imageWidth < 0.525
+                     && static_cast<double>(contours[i][j].y) / imageHeight < 0.05)){ // Filter out the robot arm and markers
+                } else if (abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number) < close_point){
+                     close_point = abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number);
+                     grasp_point.x = contours[i][j].x;
+                     grasp_point.y = contours[i][j].y;
+                     grasp[0] = 0.707106781*(static_cast<double>(grasp_point.y) / static_cast<double>(imageHeight)) + 0.707106781*(static_cast<double>(grasp_point.x) / static_cast<double>(imageWidth)) - 1.180868325;
+                     grasp[1] = 0.707106781*(static_cast<double>(grasp_point.x) / static_cast<double>(imageWidth)) - 0.707106781*(static_cast<double>(grasp_point.y) / static_cast<double>(imageHeight));
+
+                }
+            }
         }
-
-//        std::cout << "\n" << "grasp_pointx: " << grasp_point.x << "grasp_pointy: " << grasp_point.y;
-
+        int random_release_dir = rand()%361;
+        int random_release_dis = 50+rand()%150;
+//        int c = 0;
+        release_point = {(grasp_point.x+random_release_dis*cos(static_cast<double>(random_release_dir)/180*pi)), (grasp_point.y+random_release_dis*sin(static_cast<double>(random_release_dir)/180*pi))};
+        while((release_point.x / static_cast<double>(imageWidth) > 0.6
+              && release_point.y / static_cast<double>(imageHeight) > 0.6 )
+              || (sqrt(pow((release_point.x / static_cast<double>(imageWidth) - 0.85), 2) + pow((release_point.y / static_cast<double>(imageHeight) - 0.85), 2)) > 0.85)
+              || (release_point.x / static_cast<double>(imageWidth) > 0.90)
+              || (release_point.x / static_cast<double>(imageWidth) < 0.10)
+              || (release_point.y / static_cast<double>(imageHeight) > 0.90)
+              || (release_point.y / static_cast<double>(imageHeight) < 0.10))
+        { // Limit the release point
+//            c++;
+            random_release_dir = rand()%361;
+            random_release_dis = 50+rand()%150;
+            release_point = {(grasp_point.x+random_release_dis*cos(static_cast<double>(random_release_dir)/180*pi)), (grasp_point.y+random_release_dis*sin(static_cast<double>(random_release_dir)/180*pi))};
+//            qDebug()<<"x: "<< release_point.x << "y: "<< release_point.y;
+        }
+//        qDebug() << c;
+        release[0] = 0.707106781*(static_cast<double>(release_point.y) / static_cast<double>(imageHeight)) + 0.707106781*(static_cast<double>(release_point.x) / static_cast<double>(imageWidth)) - 1.202081528;
+        release[1] = 0.707106781*(static_cast<double>(release_point.x) / static_cast<double>(imageWidth)) - 0.707106781*(static_cast<double>(release_point.y) / static_cast<double>(imageHeight));
         cv::circle( drawing,
-                    grasp_point,
+                    release_point,
                     15,
-                    cv::Scalar( 0, 0, 255 ),
+                    cv::Scalar( 0, 255, 0 ),
                     cv::FILLED,
                     cv::LINE_8 );
+    }
 
-        gLock.lockForWrite();
-        gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
-        gLock.unlock();
-        emit glUpdateRequest();
+    cv::circle( drawing,
+                grasp_point,
+                15,
+                cv::Scalar( 0, 0, 255 ),
+                cv::FILLED,
+                cv::LINE_8 );
 
-        // Find the depth of grasp point
-        cv::Mat lambda, OriginalCoordinates;
-        std::vector<cv::Point2f> InQuad(4), OutQuad(4);
+    gLock.lockForWrite();
+    gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
+    gLock.unlock();
+    emit glUpdateRequest();
 
-        cv::resize(warped_image, warped_image, cv::Size(Src.cols, Src.rows));
-        lambda = cv::Mat::zeros( Src.cols, Src.rows, warped_image.type() );
-        std::vector<double> scale(4);
+    // Find the depth of grasp point
+    cv::Point2f warpedp = cv::Point2f(grasp_point.x/static_cast<float>(imageWidth)*warped_image_size.width, grasp_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+    cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+    float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+    auto depth = frames.get_depth_frame();
+    rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+    int P = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
 
-        scale[0] = Src.cols/(roi_corners[0].y - roi_corners[1].y);
-        scale[1] = Src.rows/(roi_corners[2].x - roi_corners[1].x);
-        scale[2] = Src.cols/(roi_corners[3].y - roi_corners[2].y);
-        scale[3] = Src.rows/(roi_corners[3].x - roi_corners[0].x);
+    if(P >= mPointCloud.size()){
+        for(int i=0; i<4; i++){
+            roi_corners[i].x = 0;
+            roi_corners[i].y = 0;
+        }
+        for(int i=0; i<3; i++){
+            trans[i] = 0;
+        }
+        frame = 0;
+        gStopFindWorkspace = false;
 
-        OutQuad[0] = cv::Point2f(0, 0);
-        OutQuad[1] = cv::Point2f(Src.cols-1, 0);
-        OutQuad[2] = cv::Point2f(Src.cols-1, Src.rows-1);
-        OutQuad[3] = cv::Point2f(0, Src.rows-1);
+        qDebug() << "Wrong grasp point!";
 
-        InQuad[0] = cv::Point2f(Src.cols+roi_corners[1].y*scale[0], -roi_corners[1].x*scale[1]);
-        InQuad[1] = cv::Point2f(Src.cols+roi_corners[2].y*scale[2], Src.rows+(Src.cols-roi_corners[2].x)*scale[1]);
-        InQuad[2] = cv::Point2f((roi_corners[3].y-Src.rows)*scale[2], Src.rows+(Src.cols-roi_corners[3].x)*scale[3]);
-        InQuad[3] = cv::Point2f((roi_corners[0].y-Src.rows)*scale[0], -roi_corners[0].x*scale[3]);
+        return;
+    }
 
-        lambda = cv::getPerspectiveTransform(InQuad, OutQuad);
-        cv::warpPerspective(warped_image, OriginalCoordinates, lambda, OriginalCoordinates.size());
+    acount = 0;
+    averagegp = 0;
+    graspp = P;
+    mCalAveragePoint = true;
+    while (acount<30){
+        Sleeper::sleep(1);
+    }
+    mCalAveragePoint = false;
+    grasp[2] = 0.249 + static_cast<double>(averagegp)/acount;
 
-        gLock.lockForWrite();
-        gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
-        gLock.unlock();
-        emit glUpdateRequest();
+    if(grasp[2] <= 0.250){
+        grasp[2] = 0.250;
+    }
 
-        cv::Point2f p = cv::Point2f(grasp_point.x/static_cast<double>(imageWidth)*Src.cols, grasp_point.y/static_cast<double>(imageHeight)*Src.rows); // your original point
-        double px = (lambda.at<double>(0,0)*p.x + lambda.at<double>(0,1)*p.y + lambda.at<double>(0,2)) / ((lambda.at<double>(2,0)*p.x + lambda.at<double>(2,1)*p.y + lambda.at<double>(2,2)));
-        double py = (lambda.at<double>(1,0)*p.x + lambda.at<double>(1,1)*p.y + lambda.at<double>(1,2)) / ((lambda.at<double>(2,0)*p.x + lambda.at<double>(2,1)*p.y + lambda.at<double>(2,2)));
-        cv::Point2f result = cv::Point2f(int(px/Src.cols*depthw), int(py/Src.rows*depthh)); // after transformation
+//    qDebug()<< grasp[2];
 
-        grasp[2] = 0.233 + mPointCloud[result.x*depthh + (depthh-result.y)].z();
+    mGraspP.resize(1);
+    mGraspP[0] = mPointCloud[P];
 
-
-        //mTestP.push_back(mPointCloud[pointposi]);
-        mTestP.push_back(mPointCloud[result.x*depthh + (depthh-result.y)]);
-
-//        qDebug()<< "px: "<<p.x<< "py: "<<p.y<< "resultx: " << result.x << "resulty: "<< result.y;
-        qDebug()<< "size: " << mPointCloud.size() << "posi: "<< result.x*depthh + (depthh-result.y) << "h: " << grasp[2];
-
-
+    if(!gPlan){
         // Write the plan file
         QString filename = "/home/cpii/projects/scripts/move.sh";
         QFile file(filename);
@@ -871,7 +1110,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
                   << "\n"
                   << "sleep 3" << "\n"
                   << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.4, 0, 0.8, -3.14, 0, 0], velocity: 1, acc_time: 0.1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.4, 0, 0.7, -3.14, 0, 0], velocity: 1, acc_time: 0.1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
                   << "\n"
                   << "sleep 3" << "\n"
                   << "\n"
@@ -886,38 +1125,142 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         }
         file.close();
     } else {
-        // Find the table
-        std::vector<cv::Point2f> midpoints(4), dst_corners(4);
-        midpoints[0] = (roi_corners[0] + roi_corners[1]) / 2;
-        midpoints[1] = (roi_corners[1] + roi_corners[2]) / 2;
-        midpoints[2] = (roi_corners[2] + roi_corners[3]) / 2;
-        midpoints[3] = (roi_corners[3] + roi_corners[0]) / 2;
-        dst_corners[0].x = 0;
-        dst_corners[0].y = 0;
-        dst_corners[1].x = (float)norm(midpoints[1] - midpoints[3]);
-        dst_corners[1].y = 0;
-        dst_corners[2].x = dst_corners[1].x;
-        dst_corners[2].y = (float)norm(midpoints[0] - midpoints[2]);
-        dst_corners[3].x = 0;
-        dst_corners[3].y = dst_corners[2].y;
-        cv::Size warped_image_size = cv::Size(cvRound(dst_corners[2].x), cvRound(dst_corners[2].y));
-        cv::Mat WarpMatrix = cv::getPerspectiveTransform(roi_corners, dst_corners);
-        cv::Mat warped_image;
-        cv::warpPerspective(gCamimage, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+        std::vector<std::string> points;
+        for (auto i=0; i<mPointCloud.size(); i++){
+            points.push_back(std::to_string(mPointCloud[i].z()));
+        }
+        std::vector<cv::Point2f> OriTablePoints;
+        for(int i=0; i<warped_image.cols; i++){
+            for(int j=0; j<warped_image.rows; j++){
+                cv::Point2f warpedp = cv::Point2f(i/static_cast<float>(imageWidth)*warped_image_size.width, j/static_cast<float>(imageHeight)*warped_image_size.height);
+                cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+                float color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+                OriTablePoints.emplace_back(cv::Point2f(color_point[0], color_point[1]));
+            }
+        }
+        std::vector<std::string> tablepoints;
+//        mTestP.resize(OriTablePoints.size());
+        for (int i=0; i<OriTablePoints.size(); i++){
+            float tmp_depth_point[2] = {0}, tmp_color_point[2] = {OriTablePoints[i].x, OriTablePoints[i].y};
+            auto depth = frames.get_depth_frame();
+            rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
+            int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
+//            mTestP[i] = mPointCloud[tmpTableP];
+            tablepoints.push_back(std::to_string(mPointCloud[tmpTableP].z()));
+        }
 
-        //cv::imshow("Warped Image", warped_image);
-        gLock.lockForWrite();
-        gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
-        gLock.unlock();
-        emit glUpdateRequest();
+        cv::Point2f warpedp = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width, release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+        cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+        float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+        auto depth = frames.get_depth_frame();
+        rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+        int PP = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
+        mReleaseP.resize(1);
+        mReleaseP[0] = mPointCloud[PP];
 
+        float height = (rand()%20 + 5)*0.01;
 
+        // Save data
+        // Create Directory
+        QString filename_dir = QString("/home/cpii/projects/data/%1").arg(datanumber);
+        QDir dir;
+        dir.mkpath(filename_dir);
 
+        // Save points
+        QString filename_points = QString("/home/cpii/projects/data/%1/before_points.txt").arg(datanumber);
+        QByteArray filename_pointsc = filename_points.toLocal8Bit();
+        const char *filename_pointscc = filename_pointsc.data();
+        std::ofstream output_file(filename_pointscc);
+        std::ostream_iterator<std::string> output_iterator(output_file, "\n");
+        std::copy(points.begin(), points.end(), output_iterator);
 
+        // Save table points
+        QString filename_tablepoints = QString("/home/cpii/projects/data/%1/before_tablepoints.txt").arg(datanumber);
+        QByteArray filename_tablepointsc = filename_tablepoints.toLocal8Bit();
+        const char *filename_tablepointscc = filename_tablepointsc.data();
+        std::ofstream output_file2(filename_tablepointscc);
+        std::ostream_iterator<std::string> output_iterator2(output_file2, "\n");
+        std::copy(tablepoints.begin(), tablepoints.end(), output_iterator2);
 
+        // Save Src
+        QString filename_Src = QString("/home/cpii/projects/data/%1/before_Src.jpg").arg(datanumber);
+        QByteArray filename_Srcc = filename_Src.toLocal8Bit();
+        const char *filename_Srccc = filename_Srcc.data();
+        cv::imwrite(filename_Srccc, Src);
+
+        // Save warped image
+        QString filename_warped = QString("/home/cpii/projects/data/%1/before_warped_image.jpg").arg(datanumber);
+        QByteArray filename_warpedc = filename_warped.toLocal8Bit();
+        const char *filename_warpedcc = filename_warpedc.data();
+        cv::imwrite(filename_warpedcc, warped_image);
+
+        // Save grasp and release points
+        QString filename_grp = QString("/home/cpii/projects/data/%1/grasp_release_points.txt").arg(datanumber);
+        QFile filep(filename_grp);
+        if(filep.open(QIODevice::ReadWrite)) {
+            QTextStream streamp(&filep);
+            streamp << grasp_point.x << "\n"
+                    << grasp_point.y << "\n"
+                    << release_point.x << "\n"
+                    << release_point.y << "\n"
+                    << grasp[2]+height;
+        }
+
+        // Write the unfold plan file
+        QString filename = "/home/cpii/projects/scripts/unfold.sh";
+        QFile file(filename);
+
+        if (file.open(QIODevice::ReadWrite)) {
+           file.setPermissions(QFileDevice::Permissions(1909));
+           QTextStream stream(&file);
+           stream << "#!/bin/bash" << "\n"
+                  << "\n"
+                  << "cd" << "\n"
+                  << "\n"
+                  << "source /opt/ros/foxy/setup.bash" << "\n"
+                  << "\n"
+                  << "source ~/ws_ros2/install/setup.bash" << "\n"
+                  << "\n"
+                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                  << "\n"
+                  << "cd tm_robot_gripper/" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                  << "\n"
+                  << "sleep 3" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, 0], velocity: 1, acc_time: 0.1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  << "\n"
+                  << "sleep 7" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, 0], velocity: 1, acc_time: 0.1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  << "\n"
+                  << "sleep 3" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                  << "\n"
+                  << "sleep 3" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+height <<", -3.14, 0, 0], velocity: 1, acc_time: 0.1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  << "\n"
+                  << "sleep 3" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, 0], velocity: 1, acc_time: 0.1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  << "\n"
+                  << "sleep 7" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                  << "\n"
+                  << "sleep 3" << "\n"
+                  << "\n"
+                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.2, -0.5, 0.4, -3.14, 0, 0], velocity: 1, acc_time: 1, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  << "\n";
+        } else {
+           qDebug("file open error");
+        }
+        file.close();
     }
 }
-
 
 void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSurface *surf, QOpenGLFramebufferObject *fbo, const LP_RendererCam &cam, const QVariant &options)
 {
@@ -1092,6 +1435,14 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_R(QOpenGLContext *ctx, QSu
         mProgram_R->setUniformValue("f_pointSize", 20.0f);
         f->glDrawArrays(GL_POINTS, 0, mTestP.size());
 
+        mProgram_R->setAttributeArray("a_pos", mGraspP.data());
+        mProgram_R->setUniformValue("f_pointSize", 20.0f);
+        f->glDrawArrays(GL_POINTS, 0, mGraspP.size());
+
+        mProgram_R->setAttributeArray("a_pos", mReleaseP.data());
+        mProgram_R->setUniformValue("f_pointSize", 20.0f);
+        f->glDrawArrays(GL_POINTS, 0, mReleaseP.size());
+
         texture1.release();
 
         std::vector<QVector3D> tmpPC;
@@ -1104,6 +1455,9 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_R(QOpenGLContext *ctx, QSu
         mProgram_R->setAttributeArray("a_pos", tmpPC.data());
         f->glDrawArrays(GL_POINTS, 0, tmpPC.size());
 
+
+        mProgram_R->disableAttributeArray("a_pos");
+        mProgram_R->disableAttributeArray("a_tex");
         mProgram_R->release();
         fbo->release();
     }
@@ -1161,6 +1515,7 @@ void LP_Plugin_Garment_Manipulation::initializeGL_R()
             "}";
         fsh =
             "uniform sampler2D u_tex;\n"    //Defined the point color variable that will be set in FunctionRender()
+            "uniform vec4 v4_color;\n"
             "varying vec2 tex;\n"
             "void main(){\n"
             "   vec4 v4_color = texture2D(u_tex, tex);\n"
