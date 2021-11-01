@@ -27,10 +27,13 @@
 
 #include <librealsense2/rs.hpp>
 #include <librealsense2/rsutil.h>
+<<<<<<< HEAD
 
 #include <yolo_v2_class.hpp>
 
 #include <tensorboard_logger.h>
+=======
+>>>>>>> a85d1eeb58a4c32e00cb2801458a21871f605d8c
 
 #include <math.h>
 #include <QProcess>
@@ -93,6 +96,7 @@ private:
         bool mInitialized_R = false;
         bool gCameraDisplay = true;
         bool mRunCollectData = false;
+<<<<<<< HEAD
         bool mRunReinforcementLearning1 = false;
         bool mCalAveragePoint = false;
         bool gFoundBackground = false;
@@ -102,6 +106,12 @@ private:
         std::shared_ptr<QWidget> mWidget;
         QLabel *mLabel = nullptr;
         QLabel *mLabel2 = nullptr;
+=======
+        bool mCalAveragePoint = false;
+        bool gFindBackground = false;
+        std::shared_ptr<QWidget> mWidget;
+        QLabel *mLabel = nullptr;
+>>>>>>> a85d1eeb58a4c32e00cb2801458a21871f605d8c
         QPushButton *mbutton1 = nullptr;
         QOpenGLShaderProgram *mProgram_L = nullptr,
                              *mProgram_R = nullptr;
@@ -120,6 +130,7 @@ private:
         std::vector<QVector3D> mPointCloud, mPointCloudColor, mGraspP, mReleaseP, mTestP;
         std::vector<QVector2D> mPointCloudTex;
 
+<<<<<<< HEAD
         double pi = M_PI;
         cv::Mat gCamimage, Src, warped_image, background, saved_warped_image, drawing, OriginalCoordinates;
         std::vector<std::vector<cv::Point>> contours;
@@ -149,16 +160,21 @@ private:
         std::shared_ptr<Detector> mDetector;
 
         void adjustHeight(double &in, const double &min);
+=======
+>>>>>>> a85d1eeb58a4c32e00cb2801458a21871f605d8c
         /**
          * @brief initializeGL initalize any OpenGL resource
          */
 void initializeGL_L();
 void initializeGL_R();
 
+<<<<<<< HEAD
 
 // QObject interface
 protected:
 void timerEvent(QTimerEvent *event);
+=======
+>>>>>>> a85d1eeb58a4c32e00cb2801458a21871f605d8c
 };
 
 
