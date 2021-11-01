@@ -1,7 +1,7 @@
 QT += gui widgets
 
 TEMPLATE = lib
-DEFINES += LP_PLUGIN_GARMENT_MANIPULATION_LIBRARY
+DEFINES += LP_PLUGIN_GARMENT_MANIPULATION_LIBRARY OPENCV
 
 CONFIG += c++17
 
@@ -80,3 +80,30 @@ DEPENDPATH += $$PWD/../../../librealsense-master/include/librealsense2
 
 INCLUDEPATH += $$PWD/../../../librealsense-master/examples
 DEPENDPATH += $$PWD/../../../librealsense-master/examples
+
+unix:!macx: LIBS += -L$$PWD/../../../bullet3/build_cmake/install/lib/ \
+    -lBulletSoftBody \
+    -lBulletCollision \
+    -lBulletDynamics \
+    -lBulletRobotics
+
+INCLUDEPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
+DEPENDPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
+
+INCLUDEPATH += $$PWD/../../../darknet-master/include/
+DEPENDPATH += $$PWD/../../../darknet-master/include/
+
+INCLUDEPATH += $$PWD/../../../libtorch/include/
+DEPENDPATH += $$PWD/../../../libtorch/include/
+
+INCLUDEPATH += $$PWD/../../../libtorch/include/torch/csrc/api/include
+DEPENDPATH += $$PWD/../../../libtorch/include/torch/csrc/api/include
+
+INCLUDEPATH += $$PWD/../../../tensorboard_logger-master/include
+DEPENDPATH += $$PWD/../../../tensorboard_logger-master/include
+
+INCLUDEPATH += $$PWD/../../../tensorboard_logger-master/build
+DEPENDPATH += $$PWD/../../../tensorboard_logger-master/build
+
+unix:!macx: LIBS += -L$$PWD/../../../tensorboard_logger-master/build \
+   -ltensorboard_logger
