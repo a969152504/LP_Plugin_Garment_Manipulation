@@ -89,7 +89,6 @@ unix:!macx: LIBS += -L$$PWD/../../../bullet3/build_cmake/install/lib/ \
 
 INCLUDEPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
 DEPENDPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
-<<<<<<< HEAD
 
 INCLUDEPATH += $$PWD/../../../darknet-master/include/
 DEPENDPATH += $$PWD/../../../darknet-master/include/
@@ -108,5 +107,3 @@ DEPENDPATH += $$PWD/../../../tensorboard_logger-master/build
 
 unix:!macx: LIBS += -L$$PWD/../../../tensorboard_logger-master/build \
    -ltensorboard_logger
-=======
->>>>>>> a85d1eeb58a4c32e00cb2801458a21871f605d8c
