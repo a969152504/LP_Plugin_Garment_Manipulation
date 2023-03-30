@@ -22,14 +22,9 @@
 #include <QPainter>
 
 #include "gym_arm.cpp"
+#include "LPAP.cpp"
 
-/**
- * @brief BulletPhysics Headers
- */
-//#include <BulletSoftBody/btSoftBody.h>
-//#include <Bullet3Dynamics/b3CpuRigidBodyPipeline.h>
-
-//tensorboard --logdir /home/cpii/projects/log/cloth_test/trial1/tfevents.pb
+//tensorboard --logdir /home/cpii/projects/log/cloth_test/trial1
 const std::string kLogFile = "/home/cpii/projects/log/cloth_test/trial1/tfevents.pb";
 const std::string kLogFile2 = "/home/cpii/projects/log/sac_model5_rectangle/trial15/tfevents.pb";
 const QString dataPath("/home/cpii/projects/data");
@@ -50,10 +45,10 @@ constexpr uchar uThres = 245, uThres_low = 10;
 cv::RNG rng(12345);
 
 constexpr double robotDLimit = 0.85;    //Maximum distance the robot can reach
-const int LOG_SIG_MIN = -2, LOG_SIG_MAX = 20, STATE_DIM = 15379, ACT_DIM = 3, START_STEP = 1000, TRAINEVERY = 1, SAVEMODELEVERY = 50, TESTEVERY = 25;
-int maxepisode = 10000, maxstep = 20, teststep = 20, batch_size = 16, total_steps = 0;
+const int LOG_SIG_MIN = -2, LOG_SIG_MAX = 20, STATE_DIM = 6275, ACT_DIM = 3, START_STEP = 1000, TRAINEVERY = 1, SAVEMODELEVERY = 50, TESTEVERY = 25;
+int maxepisode = 10000, maxstep = 20, teststep = 20, batch_size = 8, total_steps = 0;
 const float ALPHA = 0.2, GAMMA = 0.99, POLYAK = 0.995;
-double lrp = 1e-3, lrc = 1e-3;
+double lrp = 2e-4, lrc = 2e-4;
 int datanum = 0;
 torch::Device device(torch::kCPU);
 
@@ -65,19 +60,20 @@ std::shared_ptr<QProcess> LP_Plugin_Garment_Manipulation::gProc_RViz;   //Define
 bool gStopFindWorkspace = false, gPlan = false, gQuit = false, mCollectAvgH = false;
 QFuture<void> gFuture;
 QImage gNullImage, gCurrentGLFrame, gEdgeImage, gWarpedImage, gInvWarpImage, gDetectImage;
+QImage gTexiltes_segmentation_drawing, gTexiltes_clustering_drawing, gTexiltes_pick_and_place_drawing;
 QReadWriteLock gLock;
 
 auto build_fc_layers (std::vector<int> dims) {
-        torch::nn::Sequential layers;
-        for(auto i=0; i<dims.size()-1; i++){
-            if(i == dims.size()-2) {
-                layers->push_back(torch::nn::LinearImpl(dims[i], dims[i+1]));
-            } else {
-                layers->push_back(torch::nn::LinearImpl(dims[i], dims[i+1]));
-                layers->push_back(torch::nn::ReLUImpl());
-            }
+    torch::nn::Sequential layers;
+    for(auto i=0; i<dims.size()-1; i++){
+        if(i == dims.size()-2) {
+            layers->push_back(torch::nn::LinearImpl(dims[i], dims[i+1]));
+        } else {
+            layers->push_back(torch::nn::LinearImpl(dims[i], dims[i+1]));
+            layers->push_back(torch::nn::ReLUImpl());
         }
-        return layers;
+    }
+    return layers;
 }
 
 // Memory
@@ -100,7 +96,7 @@ struct policy_output
 
 struct PolicyImpl : torch::nn::Module {
     PolicyImpl(std::vector<int> fc_dims)
-        : conv1(torch::nn::Conv2dOptions(3, 8, 7).stride(3).padding(3).bias(false)),
+        : conv1(torch::nn::Conv2dOptions(4, 8, 7).stride(3).padding(3).bias(false)),
           conv2(torch::nn::Conv2dOptions(8, 16, 7).stride(3).padding(3).bias(false)),
           conv3(torch::nn::Conv2dOptions(16, 32, 5).stride(2).padding(2).bias(false)),
           conv4(torch::nn::Conv2dOptions(32, 32, 3).stride(1).padding(1).bias(false)),
@@ -125,16 +121,16 @@ struct PolicyImpl : torch::nn::Module {
         //x = torch::relu(maxpool(x)); // 254*254
         //std::cout << "x: " << x.sizes() << " " << x.dtype() << std::endl;
 
-//        torch::Tensor out_tensor1 = x;
-//        out_tensor1 = out_tensor1.index({0, 14}).to(torch::kF32).clone().detach().to(torch::kCPU);
-//        std::cout << "out_tensor1: " << out_tensor1.sizes() << " " << out_tensor1.dtype() << std::endl;
-//        cv::Mat cv_mat1(254, 254, CV_32FC1, out_tensor1.data_ptr());
-//        auto min1 = out_tensor1.min().item().toFloat();
-//        auto max1 = out_tensor1.max().item().toFloat();
-//        std::cout << "min1: " << min1 << "max1: " << max1 << std::endl;
-//        cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max1-min1));
-//        std::cout << cv_mat1.type() << std::endl;
-//        cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
+        //        torch::Tensor out_tensor1 = x;
+        //        out_tensor1 = out_tensor1.index({0, 14}).to(torch::kF32).clone().detach().to(torch::kCPU);
+        //        std::cout << "out_tensor1: " << out_tensor1.sizes() << " " << out_tensor1.dtype() << std::endl;
+        //        cv::Mat cv_mat1(254, 254, CV_32FC1, out_tensor1.data_ptr());
+        //        auto min1 = out_tensor1.min().item().toFloat();
+        //        auto max1 = out_tensor1.max().item().toFloat();
+        //        std::cout << "min1: " << min1 << "max1: " << max1 << std::endl;
+        //        cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max1-min1));
+        //        std::cout << cv_mat1.type() << std::endl;
+        //        cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
 
         //x = relu(conv2(x)); // 254*254
         //std::cout << "x: " << x.sizes() << std::endl;
@@ -142,15 +138,15 @@ struct PolicyImpl : torch::nn::Module {
         //x = torch::relu(maxpool(x)); // 126*126
         //std::cout << "x: " << x.sizes() << std::endl;
 
-//        torch::Tensor out_tensor2 = x*255;
-//        out_tensor2 = out_tensor2.index({0, 3}).to(torch::kF32).clone().detach().to(torch::kCPU);
-//        std::cout << "out_tensor2: " << out_tensor2.sizes() << " " << out_tensor2.dtype() << std::endl;
-//        cv::Mat cv_mat2(126, 126, CV_32FC1, out_tensor2.data_ptr());
-//        auto min2 = out_tensor2.min().item().toFloat();
-//        auto max2 = out_tensor2.max().item().toFloat();
-//        std::cout << "min2: " << min2 << "max2: " << max2 << std::endl;
-//        cv_mat2.convertTo(cv_mat2, CV_8U);
-//        cv::cvtColor(cv_mat2, cv_mat2, CV_GRAY2BGR);
+        //        torch::Tensor out_tensor2 = x*255;
+        //        out_tensor2 = out_tensor2.index({0, 3}).to(torch::kF32).clone().detach().to(torch::kCPU);
+        //        std::cout << "out_tensor2: " << out_tensor2.sizes() << " " << out_tensor2.dtype() << std::endl;
+        //        cv::Mat cv_mat2(126, 126, CV_32FC1, out_tensor2.data_ptr());
+        //        auto min2 = out_tensor2.min().item().toFloat();
+        //        auto max2 = out_tensor2.max().item().toFloat();
+        //        std::cout << "min2: " << min2 << "max2: " << max2 << std::endl;
+        //        cv_mat2.convertTo(cv_mat2, CV_8U);
+        //        cv::cvtColor(cv_mat2, cv_mat2, CV_GRAY2BGR);
 
         //x = relu(conv3(x)); // 126*126
         //std::cout << "x: " << x.sizes() << std::endl;
@@ -160,28 +156,28 @@ struct PolicyImpl : torch::nn::Module {
 
         //x = relu(conv4(x)); // 126*126
 
-//        torch::Tensor out_tensor3 = x*255;
-//        out_tensor3 = out_tensor3.index({0, 2}).to(torch::kF32).clone().detach().to(torch::kCPU);
-//        std::cout << "out_tensor3: " << out_tensor3.sizes() << " " << out_tensor3.dtype() << std::endl;
-//        cv::Mat cv_mat3(62, 62, CV_32FC1, out_tensor3.data_ptr());
-//        auto min3 = out_tensor3.min().item().toFloat();
-//        auto max3 = out_tensor3.max().item().toFloat();
-//        std::cout << "min3: " << min3 << "max3: " << max3 << std::endl;
-//        cv_mat3.convertTo(cv_mat3, CV_8U);
-//        cv::cvtColor(cv_mat3, cv_mat3, CV_GRAY2BGR);
+        //        torch::Tensor out_tensor3 = x*255;
+        //        out_tensor3 = out_tensor3.index({0, 2}).to(torch::kF32).clone().detach().to(torch::kCPU);
+        //        std::cout << "out_tensor3: " << out_tensor3.sizes() << " " << out_tensor3.dtype() << std::endl;
+        //        cv::Mat cv_mat3(62, 62, CV_32FC1, out_tensor3.data_ptr());
+        //        auto min3 = out_tensor3.min().item().toFloat();
+        //        auto max3 = out_tensor3.max().item().toFloat();
+        //        std::cout << "min3: " << min3 << "max3: " << max3 << std::endl;
+        //        cv_mat3.convertTo(cv_mat3, CV_8U);
+        //        cv::cvtColor(cv_mat3, cv_mat3, CV_GRAY2BGR);
 
         //std::cout << cv_mat1.size() << " " << cv_mat2.size() << " " << cv_mat3.size() << std::endl;
 
-//        gLock.lockForWrite();
-//        gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_BGR888).copy();
-//        gInvWarpImage = QImage((uchar*) cv_mat2.data, cv_mat2.cols, cv_mat2.rows, cv_mat2.step, QImage::Format_BGR888).copy();
-//        gEdgeImage = QImage((uchar*) cv_mat3.data, cv_mat3.cols, cv_mat3.rows, cv_mat3.step, QImage::Format_BGR888).copy();
-//        gLock.unlock();
+        //        gLock.lockForWrite();
+        //        gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_BGR888).copy();
+        //        gInvWarpImage = QImage((uchar*) cv_mat2.data, cv_mat2.cols, cv_mat2.rows, cv_mat2.step, QImage::Format_BGR888).copy();
+        //        gEdgeImage = QImage((uchar*) cv_mat3.data, cv_mat3.cols, cv_mat3.rows, cv_mat3.step, QImage::Format_BGR888).copy();
+        //        gLock.unlock();
 
         x = x.view({x.size(0), -1});
 
         //std::cout << "x: " << x.sizes() << std::endl;
-//        std::cout << "pick_point: " << pick_point.sizes() << std::endl;
+        //        std::cout << "pick_point: " << pick_point.sizes() << std::endl;
 
         torch::Tensor netout = mlp->forward(x);
 
@@ -202,26 +198,26 @@ struct PolicyImpl : torch::nn::Module {
             auto eps = torch::randn(shape) * torch::ones(shape, mean.dtype()) + torch::zeros(shape, mean.dtype());
             action = mean + std * eps.to(device);  // for reparameterization trick (mean + std * N(0,1))
 
-//            auto eps = at::normal(0, 1, mean.sizes()).to(mean.device());
-//            eps.set_requires_grad(false);
-//            action = mean + eps * std;// for reparameterization trick (mean + std * N(0,1))
+            //            auto eps = at::normal(0, 1, mean.sizes()).to(mean.device());
+            //            eps.set_requires_grad(false);
+            //            action = mean + eps * std;// for reparameterization trick (mean + std * N(0,1))
         }
 
         //# action rescaling
-//        torch::Tensor action_scale = torch::ones({1}).to(device) * 1.0;
-//        torch::Tensor action_bias = torch::ones({1}).to(device) * 0.0;
+        //        torch::Tensor action_scale = torch::ones({1}).to(device) * 1.0;
+        //        torch::Tensor action_bias = torch::ones({1}).to(device) * 0.0;
 
-//        static auto logSqrt2Pi = torch::zeros({1}).to(mean.device());
-//        static std::once_flag flag;
-//        std::call_once(flag, [](){
-//            logSqrt2Pi[0] = 2*M_PI;
-//            logSqrt2Pi = torch::log(torch::sqrt(logSqrt2Pi));
-//        });
-//        static auto log_prob_func = [](torch::Tensor value, torch::Tensor mean, torch::Tensor std){
-//            auto var = std.pow(2);
-//            auto log_scale = std.log();
-//            return -(value - mean).pow(2) / (2 * var) - log_scale - logSqrt2Pi;
-//        };
+        //        static auto logSqrt2Pi = torch::zeros({1}).to(mean.device());
+        //        static std::once_flag flag;
+        //        std::call_once(flag, [](){
+        //            logSqrt2Pi[0] = 2*M_PI;
+        //            logSqrt2Pi = torch::log(torch::sqrt(logSqrt2Pi));
+        //        });
+        //        static auto log_prob_func = [](torch::Tensor value, torch::Tensor mean, torch::Tensor std){
+        //            auto var = std.pow(2);
+        //            auto log_scale = std.log();
+        //            return -(value - mean).pow(2) / (2 * var) - log_scale - logSqrt2Pi;
+        //        };
 
         torch::Tensor logp_pi;
         if(log_prob){
@@ -235,10 +231,10 @@ struct PolicyImpl : torch::nn::Module {
             logp_pi -= torch::sum(2.0 * (log(2.0) - action - torch::nn::functional::softplus(-2.0 * action)), 1);
             logp_pi = torch::unsqueeze(logp_pi, -1);
 
-//            logp_pi = log_prob_func(action, mean, std);
-//            // Enforcing Action Bound
-//            logp_pi -= torch::log(action_scale * (1 - torch::tanh(action).pow(2)) + 1e-6);
-//            logp_pi = logp_pi.sum(1, true);
+            //            logp_pi = log_prob_func(action, mean, std);
+            //            // Enforcing Action Bound
+            //            logp_pi -= torch::log(action_scale * (1 - torch::tanh(action).pow(2)) + 1e-6);
+            //            logp_pi = logp_pi.sum(1, true);
         } else {
             logp_pi = torch::zeros(1).to(device);
         }
@@ -246,12 +242,12 @@ struct PolicyImpl : torch::nn::Module {
         //action = torch::tanh(action);
         //action = torch::tanh(action) * action_scale + action_bias;
 
-//        auto A_Slice_tensor = action.index({"...", torch::indexing::Slice({torch::indexing::None}, 2)});
-//        auto B_Slice_tensor = action.index({"...", torch::indexing::Slice(2, 3)});
+        //        auto A_Slice_tensor = action.index({"...", torch::indexing::Slice({torch::indexing::None}, 2)});
+        //        auto B_Slice_tensor = action.index({"...", torch::indexing::Slice(2, 3)});
 
-//        auto A_action = torch::tanh(A_Slice_tensor);
-//        auto B_action = torch::sigmoid(B_Slice_tensor);
-//        action = torch::cat({A_action, B_action}, 1);
+        //        auto A_action = torch::tanh(A_Slice_tensor);
+        //        auto B_action = torch::sigmoid(B_Slice_tensor);
+        //        action = torch::cat({A_action, B_action}, 1);
 
         action = torch::sigmoid(action);
 
@@ -264,27 +260,32 @@ struct PolicyImpl : torch::nn::Module {
         torch::Tensor x = conv1(state); // 510*510
         //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::relu(maxpool(x)); // 254*254
+        //x = torch::relu(maxpool(x));
         //std::cout << "x: " << x.sizes() << " " << x.dtype() << std::endl;
 
-        x = conv2(x); // 254*254
+        x = conv2(x);
         //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::relu(maxpool(x)); // 126*126
+        //x = torch::relu(maxpool(x));
         //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = conv3(x); // 126*126
+        x = conv3(x);
         //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::relu(maxpool(x)); // 62*62
+        //x = torch::relu(maxpool(x));
+        //std::cout << "x: " << x.sizes() << std::endl;
+
+        //x = conv4(x);
+
+        x = torch::relu(maxpool(x));
         //std::cout << "x: " << x.sizes() << std::endl;
 
         x = x.view({x.size(0), -1});
 
-//        std::cout << "x: " << x.sizes() << std::endl;
-//        std::cout << "pick_point: " << pick_point.sizes() << std::endl;
+        //        std::cout << "x: " << x.sizes() << std::endl;
+        //        std::cout << "pick_point: " << pick_point.sizes() << std::endl;
 
-        x = torch::cat({x, pick_point}, -1); // 62*62*4+3 = 15379
+        x = torch::cat({x, pick_point}, -1);
         //std::cout << "x: " << x.sizes() << std::endl;
 
         torch::Tensor netout = mlp->forward(x);
@@ -306,26 +307,26 @@ struct PolicyImpl : torch::nn::Module {
             auto eps = torch::randn(shape) * torch::ones(shape, mean.dtype()) + torch::zeros(shape, mean.dtype());
             action = mean + std * eps.to(device);  // for reparameterization trick (mean + std * N(0,1))
 
-//            auto eps = at::normal(0, 1, mean.sizes()).to(mean.device());
-//            eps.set_requires_grad(false);
-//            action = mean + eps * std;// for reparameterization trick (mean + std * N(0,1))
+            //            auto eps = at::normal(0, 1, mean.sizes()).to(mean.device());
+            //            eps.set_requires_grad(false);
+            //            action = mean + eps * std;// for reparameterization trick (mean + std * N(0,1))
         }
 
         //# action rescaling
-//        torch::Tensor action_scale = torch::ones({1}).to(device) * 1.0;
-//        torch::Tensor action_bias = torch::ones({1}).to(device) * 0.0;
+        //        torch::Tensor action_scale = torch::ones({1}).to(device) * 1.0;
+        //        torch::Tensor action_bias = torch::ones({1}).to(device) * 0.0;
 
-//        static auto logSqrt2Pi = torch::zeros({1}).to(mean.device());
-//        static std::once_flag flag;
-//        std::call_once(flag, [](){
-//            logSqrt2Pi[0] = 2*M_PI;
-//            logSqrt2Pi = torch::log(torch::sqrt(logSqrt2Pi));
-//        });
-//        static auto log_prob_func = [](torch::Tensor value, torch::Tensor mean, torch::Tensor std){
-//            auto var = std.pow(2);
-//            auto log_scale = std.log();
-//            return -(value - mean).pow(2) / (2 * var) - log_scale - logSqrt2Pi;
-//        };
+        //        static auto logSqrt2Pi = torch::zeros({1}).to(mean.device());
+        //        static std::once_flag flag;
+        //        std::call_once(flag, [](){
+        //            logSqrt2Pi[0] = 2*M_PI;
+        //            logSqrt2Pi = torch::log(torch::sqrt(logSqrt2Pi));
+        //        });
+        //        static auto log_prob_func = [](torch::Tensor value, torch::Tensor mean, torch::Tensor std){
+        //            auto var = std.pow(2);
+        //            auto log_scale = std.log();
+        //            return -(value - mean).pow(2) / (2 * var) - log_scale - logSqrt2Pi;
+        //        };
 
         torch::Tensor logp_pi;
         if(log_prob){
@@ -339,10 +340,10 @@ struct PolicyImpl : torch::nn::Module {
             logp_pi -= torch::sum(2.0 * (log(2.0) - action - torch::nn::functional::softplus(-2.0 * action)), 1);
             logp_pi = torch::unsqueeze(logp_pi, -1);
 
-//            logp_pi = log_prob_func(action, mean, std);
-//            // Enforcing Action Bound
-//            logp_pi -= torch::log(action_scale * (1 - torch::tanh(action).pow(2)) + 1e-6);
-//            logp_pi = logp_pi.sum(1, true);
+            //            logp_pi = log_prob_func(action, mean, std);
+            //            // Enforcing Action Bound
+            //            logp_pi -= torch::log(action_scale * (1 - torch::tanh(action).pow(2)) + 1e-6);
+            //            logp_pi = logp_pi.sum(1, true);
         } else {
             logp_pi = torch::zeros(1).to(device);
         }
@@ -377,7 +378,7 @@ TORCH_MODULE(Policy);
 
 struct MLPQFunctionImpl : torch::nn::Module {
     MLPQFunctionImpl(std::vector<int> fc_dims)
-        : conv1(torch::nn::Conv2dOptions(3, 8, 7).stride(3).padding(3).bias(false)),
+        : conv1(torch::nn::Conv2dOptions(4, 8, 7).stride(3).padding(3).bias(false)),
           conv2(torch::nn::Conv2dOptions(8, 16, 7).stride(3).padding(3).bias(false)),
           conv3(torch::nn::Conv2dOptions(16, 32, 5).stride(2).padding(2).bias(false)),
           conv4(torch::nn::Conv2dOptions(32, 32, 3).stride(1).padding(1).bias(false)),
@@ -427,20 +428,30 @@ struct MLPQFunctionImpl : torch::nn::Module {
 
     torch::Tensor forward_pick_point(torch::Tensor state, torch::Tensor pick_point, torch::Tensor action){
         torch::Tensor x = conv1(state); // 510*510
+        //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::relu(maxpool(x)); // 254*254
+        //x = torch::relu(maxpool(x));
 
-        x = conv2(x); // 254*254
+        x = conv2(x);
+        //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::relu(maxpool(x)); // 126*126
+        //x = torch::relu(maxpool(x));
 
-        x = conv3(x); // 126*126
+        x = conv3(x);
+        //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::relu(maxpool(x)); // 62*62
+        //x = torch::relu(maxpool(x));
+
+        //x = conv4(x);
+
+        x = torch::relu(maxpool(x));
+        //std::cout << "x: " << x.sizes() << std::endl;
 
         x = x.view({x.size(0), -1});
+        //std::cout << "x: " << x.sizes() << std::endl;
 
-        x = torch::cat({x, pick_point}, -1); // 62*62*4+3 = 15379
+        x = torch::cat({x, pick_point}, -1);
+        //std::cout << "x: " << x.sizes() << std::endl;
 
         x = q->forward(torch::cat({x, action}, -1));
 
@@ -455,9 +466,9 @@ TORCH_MODULE(MLPQFunction);
 
 struct ActorCriticImpl : torch::nn::Module {
     ActorCriticImpl(std::vector<int> policy_fc_dims, std::vector<int> critic_fc_dims) {
-          pi = Policy(policy_fc_dims);
-          q1 = MLPQFunction(critic_fc_dims);
-          q2 = MLPQFunction(critic_fc_dims);
+        pi = Policy(policy_fc_dims);
+        q1 = MLPQFunction(critic_fc_dims);
+        q2 = MLPQFunction(critic_fc_dims);
     }
 
     torch::Tensor act(torch::Tensor state, bool deterministic) {
@@ -550,21 +561,21 @@ QImage realsenseFrameToQImage(const rs2::frame &f)
         auto r = QImage(w, h, QImage::QImage::Format_RGB888);
 
         static auto rainbow = [](int p, int np, float&r, float&g, float&b) {    //16,777,216
-                float inc = 6.0 / np;
-                float x = p * inc;
-                r = 0.0f; g = 0.0f; b = 0.0f;
-                if ((0 <= x && x <= 1) || (5 <= x && x <= 6)) r = 1.0f;
-                else if (4 <= x && x <= 5) r = x - 4;
-                else if (1 <= x && x <= 2) r = 1.0f - (x - 1);
-                if (1 <= x && x <= 3) g = 1.0f;
-                else if (0 <= x && x <= 1) g = x - 0;
-                else if (3 <= x && x <= 4) g = 1.0f - (x - 3);
-                if (3 <= x && x <= 5) b = 1.0f;
-                else if (2 <= x && x <= 3) b = x - 2;
-                else if (5 <= x && x <= 6) b = 1.0f - (x - 5);
-            };
+            float inc = 6.0 / np;
+            float x = p * inc;
+            r = 0.0f; g = 0.0f; b = 0.0f;
+            if ((0 <= x && x <= 1) || (5 <= x && x <= 6)) r = 1.0f;
+            else if (4 <= x && x <= 5) r = x - 4;
+            else if (1 <= x && x <= 2) r = 1.0f - (x - 1);
+            if (1 <= x && x <= 3) g = 1.0f;
+            else if (0 <= x && x <= 1) g = x - 0;
+            else if (3 <= x && x <= 4) g = 1.0f - (x - 3);
+            if (3 <= x && x <= 5) b = 1.0f;
+            else if (2 <= x && x <= 3) b = x - 2;
+            else if (5 <= x && x <= 6) b = 1.0f - (x - 5);
+        };
 
-       // auto curPixel = r.bits();
+        // auto curPixel = r.bits();
         float maxDepth = 1.0 / 2.0;
         float R, G, B;
         for ( int i=0; i<w; ++i ){
@@ -590,6 +601,24 @@ static double angle( cv::Point pt1, cv::Point pt2, cv::Point pt0 )
     double dx2 = pt2.x - pt0.x;
     double dy2 = pt2.y - pt0.y;
     return (dx1*dx2 + dy1*dy2)/sqrt((dx1*dx1 + dy1*dy1)*(dx2*dx2 + dy2*dy2) + 1e-10);
+}
+
+float angleBetween(const cv::Point &v1, const cv::Point &v2)
+{
+    float len1 = hypot(v1.x, v1.y);
+    float len2 = hypot(v2.x, v2.y);
+
+    float dot = v1.x * v2.x + v1.y * v2.y;
+
+    float a = dot / (len1 * len2);
+
+    if (a >= 1.0) {
+        return 0.0;
+    } else if (a <= -1.0) {
+        return PI;
+    } else {
+        return acos(a); // 0..PI
+    }
 }
 
 void LP_Plugin_Garment_Manipulation::textbox_draw(cv::Mat src, std::vector<cv::Rect>& groups, std::vector<float>& probs, std::vector<int>& indexes)
@@ -660,7 +689,7 @@ void LP_Plugin_Garment_Manipulation::findSquares( const cv::Mat& image, std::vec
     // down-scale and upscale the image to filter out the noise
     cv::pyrDown(image, pyr, cv::Size(image.cols/2, image.rows/2));
     cv::pyrUp(pyr, timg, image.size());
-    std::vector<std::vector<cv::Point> > contours;
+    std::vector<std::vector<cv::Point>> contours;
     // find squares in every color plane of the image
     for( int c = 0; c < 3; c++ )
     {
@@ -704,8 +733,8 @@ void LP_Plugin_Garment_Manipulation::findSquares( const cv::Mat& image, std::vec
                 // area may be positive or negative - in accordance with the
                 // contour orientation
                 if( approx.size() == 4 &&
-                    fabs(cv::contourArea(approx)) > 1000 &&
-                    cv::isContourConvex(approx) )
+                        fabs(cv::contourArea(approx)) > 1000 &&
+                        cv::isContourConvex(approx) )
                 {
                     double maxCosine = 0;
                     for( int j = 2; j < 5; j++ )
@@ -721,9 +750,9 @@ void LP_Plugin_Garment_Manipulation::findSquares( const cv::Mat& image, std::vec
                         bool save = true;
                         for(auto j = 0; j < approx.size(); j++){
                             if (   static_cast<double>(approx[j].x) / imageWidth < 0.02
-                                || static_cast<double>(approx[j].x) / imageHeight > 0.98
-                                || static_cast<double>(approx[j].y) / imageWidth < 0.02
-                                || static_cast<double>(approx[j].y) / imageHeight > 0.98){
+                                   || static_cast<double>(approx[j].x) / imageHeight > 0.98
+                                   || static_cast<double>(approx[j].y) / imageWidth < 0.02
+                                   || static_cast<double>(approx[j].y) / imageHeight > 0.98){
                                 save = false;
                             }
                         }
@@ -756,21 +785,21 @@ void LP_Plugin_Garment_Manipulation::findLines( const cv::Mat image)
     cv::cvtColor(dst, cdst, cv::COLOR_GRAY2BGR);
     cdstP = cdst.clone();
     // Standard Hough Line Transform
-//    std::vector<cv::Vec2f> lines; // will hold the results of the detection
-//    cv::HoughLines(dst, lines, 1, CV_PI/180, 150, 0, 0 ); // runs the actual detection
-//    // Draw the lines
-//    for( size_t i = 0; i < lines.size(); i++ )
-//    {
-//        float rho = lines[i][0], theta = lines[i][1];
-//        cv::Point pt1, pt2;
-//        double a = cos(theta), b = sin(theta);
-//        double x0 = a*rho, y0 = b*rho;
-//        pt1.x = cvRound(x0 + 1000*(-b));
-//        pt1.y = cvRound(y0 + 1000*(a));
-//        pt2.x = cvRound(x0 - 1000*(-b));
-//        pt2.y = cvRound(y0 - 1000*(a));
-//        cv::line( cdst, pt1, pt2, cv::Scalar(0,0,255), 3, cv::LINE_AA);
-//    }
+    //    std::vector<cv::Vec2f> lines; // will hold the results of the detection
+    //    cv::HoughLines(dst, lines, 1, CV_PI/180, 150, 0, 0 ); // runs the actual detection
+    //    // Draw the lines
+    //    for( size_t i = 0; i < lines.size(); i++ )
+    //    {
+    //        float rho = lines[i][0], theta = lines[i][1];
+    //        cv::Point pt1, pt2;
+    //        double a = cos(theta), b = sin(theta);
+    //        double x0 = a*rho, y0 = b*rho;
+    //        pt1.x = cvRound(x0 + 1000*(-b));
+    //        pt1.y = cvRound(y0 + 1000*(a));
+    //        pt2.x = cvRound(x0 - 1000*(-b));
+    //        pt2.y = cvRound(y0 - 1000*(a));
+    //        cv::line( cdst, pt1, pt2, cv::Scalar(0,0,255), 3, cv::LINE_AA);
+    //    }
     // Probabilistic Line Transform
     std::vector<cv::Vec4i> linesP; // will hold the results of the detection
     cv::HoughLinesP(dst, linesP, 1, CV_PI/180, 50, 50, 10 ); // runs the actual detection
@@ -840,6 +869,9 @@ LP_Plugin_Garment_Manipulation::~LP_Plugin_Garment_Manipulation()
     gEdgeImage = gNullImage;
     gWarpedImage = gNullImage;
     gInvWarpImage = gNullImage;
+    gTexiltes_segmentation_drawing = gNullImage;
+    gTexiltes_clustering_drawing = gNullImage;
+    gTexiltes_pick_and_place_drawing = gNullImage;
 
     mDetector.reset();
 }
@@ -849,28 +881,37 @@ QWidget *LP_Plugin_Garment_Manipulation::DockUi()
     mWidget = std::make_shared<QWidget>();
     QVBoxLayout *layout = new QVBoxLayout(mWidget.get());
 
-    mLabel = new QLabel("Right click to find the workspace");
+    mLabel = new QLabel("Right click to find the workspace and save the background");
     mLabel2 = new QLabel(" ");
     mButton0 = new QPushButton("Start");
     mButton1 = new QPushButton("Start Reinforcement_Learning_1");
     mButton2 = new QPushButton("Start Reinforcement_Learning_2");
     mButton3 = new QPushButton("Start Train_rod");
+    mButton4 = new QPushButton("Start LPAP");
+    mButton5 = new QPushButton("Start TEXTILES");
 
     layout->addWidget(mLabel);
-    layout->addWidget(mLabel);
+    //layout->addWidget(mLabel2);
     layout->addWidget(mButton1);
     layout->addWidget(mButton2);
     layout->addWidget(mButton3);
+    layout->addWidget(mButton4);
+    layout->addWidget(mButton5);
 
     mWidget->setLayout(layout);
 
     connect(mButton1, &QPushButton::clicked, [this](bool checked){
-        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2 && !mRunTrainRod && !mGenerateData){
+        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+                && !mRunTrainRod && !mGenerateData && !mRunLPAP && !mRunTEXTILES){
             mRunReinforcementLearning1 = true;
-            mLabel->setText("Start Reinforcement Learning_1, press SPACE to stop");
+            mLabel->setText("Start Reinforcement Learning_1,\n press SPACE to stop");
             Reinforcement_Learning_1();
         } else if(mRunReinforcementLearning1 || mRunReinforcementLearning2 || mRunTrainRod){
             qDebug() << "Training, press SPACE to stop";
+        } else if(mRunLPAP){
+            qDebug() << "Running LPAP, press SPACE to stop";
+        } else if(mRunTEXTILES){
+            qDebug() << "Running TEXTILES, press SPACE to stop";
         } else if(mRunCollectData){
             qDebug() << "Collecting data, can not start training";
         } else if(mGenerateData){
@@ -880,12 +921,17 @@ QWidget *LP_Plugin_Garment_Manipulation::DockUi()
         }
     });
     connect(mButton2, &QPushButton::clicked, [this](bool checked){
-        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2 && !mRunTrainRod && !mGenerateData){
+        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+                && !mRunTrainRod && !mGenerateData && !mRunLPAP && !mRunTEXTILES){
             mRunReinforcementLearning2 = true;
-            mLabel->setText("Start Reinforcement Learning_2, press SPACE to stop");
+            mLabel->setText("Start Reinforcement Learning_2,\n press SPACE to stop");
             Reinforcement_Learning_2();
         } else if(mRunReinforcementLearning1 || mRunReinforcementLearning2 || mRunTrainRod){
             qDebug() << "Training, press SPACE to stop";
+        } else if(mRunLPAP){
+            qDebug() << "Running LPAP, press SPACE to stop";
+        } else if(mRunTEXTILES){
+            qDebug() << "Running TEXTILES, press SPACE to stop";
         } else if(mRunCollectData){
             qDebug() << "Collecting data, can not start training";
         } else if(mGenerateData){
@@ -895,12 +941,17 @@ QWidget *LP_Plugin_Garment_Manipulation::DockUi()
         }
     });
     connect(mButton3, &QPushButton::clicked, [this](bool checked){
-        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2 && !mRunTrainRod && !mGenerateData){
+        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+                && !mRunTrainRod && !mGenerateData && !mRunLPAP && !mRunTEXTILES){
             mRunTrainRod = true;
-            mLabel->setText("Start Train Rod, press SPACE to stop");
+            mLabel->setText("Start Train Rod,\n press SPACE to stop");
             Train_rod();
         } else if(mRunReinforcementLearning1 || mRunReinforcementLearning2 || mRunTrainRod){
             qDebug() << "Training, press SPACE to stop";
+        } else if(mRunLPAP){
+            qDebug() << "Running LPAP, press SPACE to stop";
+        } else if(mRunTEXTILES){
+            qDebug() << "Running TEXTILES, press SPACE to stop";
         } else if(mRunCollectData){
             qDebug() << "Collecting data, can not start training";
         } else if(mGenerateData){
@@ -909,7 +960,46 @@ QWidget *LP_Plugin_Garment_Manipulation::DockUi()
             qDebug() << "Finding workspace, can not start training";
         }
     });
-
+    connect(mButton4, &QPushButton::clicked, [this](bool checked){
+        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+                && !mRunTrainRod && !mGenerateData && !mRunLPAP && !mRunTEXTILES){
+            mRunLPAP = true;
+            mLabel->setText("Start Run LPAP,\n press SPACE to stop");
+            RunLPAP();
+        } else if(mRunReinforcementLearning1 || mRunReinforcementLearning2 || mRunTrainRod){
+            qDebug() << "Training, press SPACE to stop";
+        } else if(mRunLPAP){
+            qDebug() << "Running LPAP, press SPACE to stop";
+        } else if(mRunTEXTILES){
+            qDebug() << "Running TEXTILES, press SPACE to stop";
+        } else if(mRunCollectData){
+            qDebug() << "Collecting data, can not start training";
+        } else if(mGenerateData){
+            qDebug() << "Generating data, can not start training";
+        } else {
+            qDebug() << "Finding workspace, can not start training";
+        }
+    });
+    connect(mButton5, &QPushButton::clicked, [this](bool checked){
+        if(gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+                && !mRunTrainRod && !mGenerateData && !mRunLPAP && !mRunTEXTILES){
+            mRunTEXTILES = true;
+            mLabel->setText("Start Run TEXTILES,\n press SPACE to stop");
+            RunTEXTILES();
+        } else if(mRunReinforcementLearning1 || mRunReinforcementLearning2 || mRunTrainRod){
+            qDebug() << "Training, press SPACE to stop";
+        } else if(mRunLPAP){
+            qDebug() << "Running LPAP, press SPACE to stop";
+        } else if(mRunTEXTILES){
+            qDebug() << "Running TEXTILES, press SPACE to stop";
+        } else if(mRunCollectData){
+            qDebug() << "Collecting data, can not start training";
+        } else if(mGenerateData){
+            qDebug() << "Generating data, can not start training";
+        } else {
+            qDebug() << "Finding workspace, can not start training";
+        }
+    });
     return mWidget.get();
 }
 
@@ -960,9 +1050,9 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
         QString filename_after_image = QString(location + QString::number(i) + "/after_warped_image.jpg");
         after_image = cv::imread(filename_after_image.toStdString());
 
-//        if(location == "/home/cpii/storage_d1/robot_garment/data_Sep9_1/" && i<1254){
-//            continue;
-//        }
+        //        if(location == "/home/cpii/storage_d1/robot_garment/data_Sep9_1/" && i<1254){
+        //            continue;
+        //        }
 
         if(!after_image.data){
             continue;
@@ -991,9 +1081,9 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
 
         cv::Matx44f trans_matrix_t2c;
         trans_matrix_t2c = cv::Matx44f(trans_matrix[0], trans_matrix[1],  trans_matrix[2],  trans_matrix[3],
-                                       trans_matrix[4], trans_matrix[5],  trans_matrix[6],  trans_matrix[7],
-                                       trans_matrix[8], trans_matrix[9], trans_matrix[10], trans_matrix[11],
-                                                  0.0f,            0.0f,             0.0f,             1.0f);
+                trans_matrix[4], trans_matrix[5],  trans_matrix[6],  trans_matrix[7],
+                trans_matrix[8], trans_matrix[9], trans_matrix[10], trans_matrix[11],
+                0.0f,            0.0f,             0.0f,             1.0f);
 
         auto matrixinv = trans_matrix_t2c.inv();
 
@@ -1046,13 +1136,13 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
                 auto PT_RGB = before_image.at<cv::Vec3b>(row, col);
                 auto PT_RGB2 = after_image.at<cv::Vec3b>(row, col);
                 if((row >= (0.6*(float)warped_image_resize.width) && col >= (0.6*(float)warped_image_resize.height))
-                    || (PT_RGB[0] >= uThres && PT_RGB[1] >= uThres && PT_RGB[2] >= uThres)){
+                        || (PT_RGB[0] >= uThres && PT_RGB[1] >= uThres && PT_RGB[2] >= uThres)){
                     before_height_mat.at<float>(row, col) = 0.0;
                 } else {
                     before_area++;
                 }
                 if((row >= (0.6*(float)warped_image_resize.width) && col >= (0.6*(float)warped_image_resize.height))
-                    || (PT_RGB2[0] >= uThres && PT_RGB2[1] >= uThres && PT_RGB2[2] >= uThres)){
+                        || (PT_RGB2[0] >= uThres && PT_RGB2[1] >= uThres && PT_RGB2[2] >= uThres)){
                     after_height_mat.at<float>(row, col) = 0.0;
                 } else {
                     after_area++;
@@ -1064,45 +1154,45 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
         cv::minMaxLoc(before_height_mat, &m, &before_max);
         cv::minMaxLoc(after_height_mat, &m, &after_max);
 
-//        float angle = 0;
+        //        float angle = 0;
         float conf_before = 0, conf_after = 0;
-//        cv::Mat rotatedImg, rotatedImg2;
-//        QImage rotatedImgqt, rotatedImgqt2;
-//        for(int a = 0; a < 36; a++){
-//            rotatedImgqt = QImage((uchar*) before_image.data, before_image.cols, before_image.rows, before_image.step, QImage::Format_BGR888);
-//            rotatedImgqt2 = QImage((uchar*) after_image.data, after_image.cols, after_image.rows, after_image.step, QImage::Format_BGR888);
+        //        cv::Mat rotatedImg, rotatedImg2;
+        //        QImage rotatedImgqt, rotatedImgqt2;
+        //        for(int a = 0; a < 36; a++){
+        //            rotatedImgqt = QImage((uchar*) before_image.data, before_image.cols, before_image.rows, before_image.step, QImage::Format_BGR888);
+        //            rotatedImgqt2 = QImage((uchar*) after_image.data, after_image.cols, after_image.rows, after_image.step, QImage::Format_BGR888);
 
-//            QMatrix r;
+        //            QMatrix r;
 
-//            r.rotate(angle*10.0);
+        //            r.rotate(angle*10.0);
 
-//            rotatedImgqt = rotatedImgqt.transformed(r);
-//            rotatedImgqt2 = rotatedImgqt2.transformed(r);
+        //            rotatedImgqt = rotatedImgqt.transformed(r);
+        //            rotatedImgqt2 = rotatedImgqt2.transformed(r);
 
-//            rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
-//            rotatedImg2 = cv::Mat(rotatedImgqt2.height(), rotatedImgqt2.width(), CV_8UC3, rotatedImgqt2.bits());
+        //            rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+        //            rotatedImg2 = cv::Mat(rotatedImgqt2.height(), rotatedImgqt2.width(), CV_8UC3, rotatedImgqt2.bits());
 
-//            std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+        //            std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
 
-//            if(test_result.size()>0){
-//                for(auto i =0; i<test_result.size(); i++){
-//                    if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
-//                        conf_before = test_result[i].prob;
-//                    }
-//                }
-//            }
+        //            if(test_result.size()>0){
+        //                for(auto i =0; i<test_result.size(); i++){
+        //                    if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
+        //                        conf_before = test_result[i].prob;
+        //                    }
+        //                }
+        //            }
 
-//            std::vector<bbox_t> test_result2 = mDetector->detect(rotatedImg2);
+        //            std::vector<bbox_t> test_result2 = mDetector->detect(rotatedImg2);
 
-//            if(test_result2.size()>0){
-//                for(auto i =0; i<test_result2.size(); i++){
-//                    if(test_result2[i].obj_id == 1 && conf_after < test_result2[i].prob && test_result2[i].prob > 0.5){
-//                        conf_after = test_result2[i].prob;
-//                    }
-//                }
-//            }
-//            angle+=1;
-//        }
+        //            if(test_result2.size()>0){
+        //                for(auto i =0; i<test_result2.size(); i++){
+        //                    if(test_result2[i].obj_id == 1 && conf_after < test_result2[i].prob && test_result2[i].prob > 0.5){
+        //                        conf_after = test_result2[i].prob;
+        //                    }
+        //                }
+        //            }
+        //            angle+=1;
+        //        }
 
         std::vector<float> stepreward(1), done(1);
         float height_reward, garment_area_reward, conf_reward;
@@ -1170,17 +1260,17 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
                 for (size_t j = 0; j < contours[i].size(); j++){
 
                     if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
-                            && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
+                         && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
                             || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
                             || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
-                            && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                                && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
                             || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
-                            && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                                && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
                             || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
-                            && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
-                            && static_cast<double>(contours[i][j].y) / imageHeight < 0.10))
+                                && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
+                                && static_cast<double>(contours[i][j].y) / imageHeight < 0.10))
                     { // Filter out the robot arm and markers
-                            size = size - 1;
+                        size = size - 1;
                     }
                 }
                 size += contours[i].size();
@@ -1191,14 +1281,14 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
 
             while((static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.6
                    && static_cast<double>(contours[randcontour][randp].y) / imageHeight > 0.6 )
-                   || (sqrt(pow((static_cast<double>(contours[randcontour][randp].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[randcontour][randp].y) / imageHeight - 0.83), 2)) > 0.7745)
-                   || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.90
-                   && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10)
-                   || (static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.10
-                   && static_cast<double>(contours[randcontour][randp].y) / imageHeight > 0.90)
-                   || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.480
-                   && static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.580
-                   && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10))
+                  || (sqrt(pow((static_cast<double>(contours[randcontour][randp].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[randcontour][randp].y) / imageHeight - 0.83), 2)) > 0.7745)
+                  || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.90
+                      && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10)
+                  || (static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.10
+                      && static_cast<double>(contours[randcontour][randp].y) / imageHeight > 0.90)
+                  || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.480
+                      && static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.580
+                      && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10))
             { // Filter out the robot arm and markers
                 randcontour = rand()%int(contours.size());
                 randp = rand()%int(contours[randcontour].size());
@@ -1281,547 +1371,552 @@ void LP_Plugin_Garment_Manipulation::trans_old_data(int datasize, QString locati
 
 bool LP_Plugin_Garment_Manipulation::Run()
 {
+    //getDataRewards();
+
     //Test network
-//    torch::manual_seed(0);
-
-//    device = torch::Device(torch::kCPU);
-//    if (torch::cuda::is_available()) {
-//        std::cout << "CUDA is available! Training on GPU." << std::endl;
-//        device = torch::Device(torch::kCUDA);
-//    }
-
-//    torch::autograd::DetectAnomalyGuard detect_anomaly;
-
-//    qDebug() << "Creating models";
-
-//    std::vector<int> policy_mlp_dims{STATE_DIM, 2048, 1024};
-//    std::vector<int> critic_mlp_dims{STATE_DIM + ACT_DIM, 2048, 1024};
-
-//    auto actor_critic = ActorCritic(policy_mlp_dims, critic_mlp_dims);
-//    auto actor_critic_target = ActorCritic(policy_mlp_dims, critic_mlp_dims);
-
-//    qDebug() << "Creating optimizer";
-
-//    torch::AutoGradMode copy_disable(false);
-
-//    std::vector<torch::Tensor> q_params;
-//    for(size_t i=0; i<actor_critic->q1->parameters().size(); i++){
-//        q_params.push_back(actor_critic->q1->parameters()[i]);
-//    }
-//    for(size_t i=0; i<actor_critic->q2->parameters().size(); i++){
-//        q_params.push_back(actor_critic->q2->parameters()[i]);
-//    }
-//    torch::AutoGradMode copy_enable(true);
-
-//    torch::optim::Adam policy_optimizer(actor_critic->pi->parameters(), torch::optim::AdamOptions(lrp));
-//    torch::optim::Adam critic_optimizer(q_params, torch::optim::AdamOptions(lrc));
-
-//    actor_critic->pi->to(device);
-//    actor_critic->q1->to(device);
-//    actor_critic->q2->to(device);
-//    actor_critic_target->pi->to(device);
-//    actor_critic_target->q1->to(device);
-//    actor_critic_target->q2->to(device);
-
-//    qDebug() << "Copying parameters to target models";
-//    torch::AutoGradMode hardcopy_disable(false);
-//    for(size_t i=0; i < actor_critic_target->pi->parameters().size(); i++){
-//        actor_critic_target->pi->parameters()[i].copy_(actor_critic->pi->parameters()[i]);
-//        actor_critic_target->pi->parameters()[i].set_requires_grad(false);
-//    }
-//    for(size_t i=0; i < actor_critic_target->q1->parameters().size(); i++){
-//        actor_critic_target->q1->parameters()[i].copy_(actor_critic->q1->parameters()[i]);
-//        actor_critic_target->q1->parameters()[i].set_requires_grad(false);
-//    }
-//    for(size_t i=0; i < actor_critic_target->q2->parameters().size(); i++){
-//        actor_critic_target->q2->parameters()[i].copy_(actor_critic->q2->parameters()[i]);
-//        actor_critic_target->q2->parameters()[i].set_requires_grad(false);
-//    }
-//    torch::AutoGradMode hardcopy_enable(true);
-
-//    auto s_batch = torch::ones({16, 3, 512, 512}).to(device);
-//    auto a_batch = torch::zeros({16, 5}).to(device);
-
-//    torch::Tensor q1 = actor_critic->q1->forward(s_batch, a_batch);
-//    policy_output sample = actor_critic->pi->forward(s_batch, false, true);
-
-//    std::cout << q1 << std::endl
-//              << sample.action << std::endl
-//              << sample.logp_pi << std::endl;
-
-//    return 0;
-// ------------------------------------------------------------------------------------------------
-//    int datasize = 0;
-//    //int count = 0;
-//    //std::vector<float> rewards{0};
-//    //QString path = "/home/cpii/storage_d1/RL1/SAC/saved_memory";
-
-//    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
-//        datasize++;
-//    }
-//    qDebug() << datasize;
-//    for(int i=10000; i<10000+datasize-2; i++){
-//        QString filename_reward = QString(memoryPath + "/" + QString::number(i) + "/reward.txt");
-//        std::vector<float> tmpreward;
-//        loaddata(filename_reward.toStdString(), tmpreward);
-//        //qDebug() << tmpreward[0];
-//        //QString filename = QString(memoryPath + "/" + QString::number(i));
-//        if(tmpreward[0] > -1000 && tmpreward[0] < -500){
-//            //rewards.push_back(i);
-//            qDebug() << i;
-//        }
-////        std::vector<float> tmpreward;
-////        QDir file(filename);
-////        if(tmpreward[0] == -10000){
-////            if (!file.removeRecursively()) {
-////                qCritical() << "[Warning] Useless data cannot be deleted : " << i;
-////            }
-////            continue;
-////        }
-////        QString rename_p(path + "/" + QString::number(count));
-////        count++;
-////        file.rename(filename, rename_p);
-////        qDebug() << i;
-//    }
-//    //std::cout << rewards;
-//    return 0;
-
-//    datasize = 7773;
-//    for (const auto & file : std::filesystem::directory_iterator(path.toStdString())){
-//            datasize++;
-//    }
-//    datasize -= 2;
-//    qDebug() << datasize;
-//    for(int i=0; i<datasize; i++){
-//        QString filename_reward = QString(memoryPath + "/" + QString::number(i) + "/reward.txt");
-//        std::vector<float> tmpreward;
-//        loaddata(filename_reward.toStdString(), tmpreward);
-//        rewards.push_back(tmpreward[0]);
-//        if(tmpreward[0]==0){
-//            QDir dir(filename_reward);
-//            if (!dir.removeRecursively()) {
-//                qCritical() << "[Warning] Useless data cannot be deleted : " << i;
-//            }
-//            tmpreward[0] = -10000;
-//            savedata(filename_reward, tmpreward);
-//            count++;
-//            qDebug() << i;
-//        }
-//    }
-//    qDebug() << count;
-//    qDebug() << datasize;
+    //    torch::manual_seed(0);
+
+    //    device = torch::Device(torch::kCPU);
+    //    if (torch::cuda::is_available()) {
+    //        std::cout << "CUDA is available! Training on GPU." << std::endl;
+    //        device = torch::Device(torch::kCUDA);
+    //    }
+
+    //    torch::autograd::DetectAnomalyGuard detect_anomaly;
+
+    //    qDebug() << "Creating models";
+
+    //    std::vector<int> policy_mlp_dims{STATE_DIM, 2048, 1024};
+    //    std::vector<int> critic_mlp_dims{STATE_DIM + ACT_DIM, 2048, 1024};
+
+    //    auto actor_critic = ActorCritic(policy_mlp_dims, critic_mlp_dims);
+    //    auto actor_critic_target = ActorCritic(policy_mlp_dims, critic_mlp_dims);
+
+    //    qDebug() << "Creating optimizer";
+
+    //    torch::AutoGradMode copy_disable(false);
+
+    //    std::vector<torch::Tensor> q_params;
+    //    for(size_t i=0; i<actor_critic->q1->parameters().size(); i++){
+    //        q_params.push_back(actor_critic->q1->parameters()[i]);
+    //    }
+    //    for(size_t i=0; i<actor_critic->q2->parameters().size(); i++){
+    //        q_params.push_back(actor_critic->q2->parameters()[i]);
+    //    }
+    //    torch::AutoGradMode copy_enable(true);
+
+    //    torch::optim::Adam policy_optimizer(actor_critic->pi->parameters(), torch::optim::AdamOptions(lrp));
+    //    torch::optim::Adam critic_optimizer(q_params, torch::optim::AdamOptions(lrc));
+
+    //    actor_critic->pi->to(device);
+    //    actor_critic->q1->to(device);
+    //    actor_critic->q2->to(device);
+    //    actor_critic_target->pi->to(device);
+    //    actor_critic_target->q1->to(device);
+    //    actor_critic_target->q2->to(device);
+
+    //    qDebug() << "Copying parameters to target models";
+    //    torch::AutoGradMode hardcopy_disable(false);
+    //    for(size_t i=0; i < actor_critic_target->pi->parameters().size(); i++){
+    //        actor_critic_target->pi->parameters()[i].copy_(actor_critic->pi->parameters()[i]);
+    //        actor_critic_target->pi->parameters()[i].set_requires_grad(false);
+    //    }
+    //    for(size_t i=0; i < actor_critic_target->q1->parameters().size(); i++){
+    //        actor_critic_target->q1->parameters()[i].copy_(actor_critic->q1->parameters()[i]);
+    //        actor_critic_target->q1->parameters()[i].set_requires_grad(false);
+    //    }
+    //    for(size_t i=0; i < actor_critic_target->q2->parameters().size(); i++){
+    //        actor_critic_target->q2->parameters()[i].copy_(actor_critic->q2->parameters()[i]);
+    //        actor_critic_target->q2->parameters()[i].set_requires_grad(false);
+    //    }
+    //    torch::AutoGradMode hardcopy_enable(true);
+
+    //    auto s_batch = torch::ones({16, 3, 512, 512}).to(device);
+    //    auto a_batch = torch::zeros({16, 5}).to(device);
+
+    //    torch::Tensor q1 = actor_critic->q1->forward(s_batch, a_batch);
+    //    policy_output sample = actor_critic->pi->forward(s_batch, false, true);
+
+    //    std::cout << q1 << std::endl
+    //              << sample.action << std::endl
+    //              << sample.logp_pi << std::endl;
+
+    //    return 0;
+    // ------------------------------------------------------------------------------------------------
+    //    int datasize = 0;
+    //    //int count = 0;
+    //    //std::vector<float> rewards{0};
+    //    //QString path = "/home/cpii/storage_d1/RL1/SAC/saved_memory";
+
+    //    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
+    //        datasize++;
+    //    }
+    //    qDebug() << datasize;
+    //    for(int i=10000; i<10000+datasize-2; i++){
+    //        QString filename_reward = QString(memoryPath + "/" + QString::number(i) + "/reward.txt");
+    //        std::vector<float> tmpreward;
+    //        loaddata(filename_reward.toStdString(), tmpreward);
+    //        //qDebug() << tmpreward[0];
+    //        //QString filename = QString(memoryPath + "/" + QString::number(i));
+    //        if(tmpreward[0] > -1000 && tmpreward[0] < -500){
+    //            //rewards.push_back(i);
+    //            qDebug() << i;
+    //        }
+    ////        std::vector<float> tmpreward;
+    ////        QDir file(filename);
+    ////        if(tmpreward[0] == -10000){
+    ////            if (!file.removeRecursively()) {
+    ////                qCritical() << "[Warning] Useless data cannot be deleted : " << i;
+    ////            }
+    ////            continue;
+    ////        }
+    ////        QString rename_p(path + "/" + QString::number(count));
+    ////        count++;
+    ////        file.rename(filename, rename_p);
+    ////        qDebug() << i;
+    //    }
+    //    //std::cout << rewards;
+    //    return 0;
+
+    //    datasize = 7773;
+    //    for (const auto & file : std::filesystem::directory_iterator(path.toStdString())){
+    //            datasize++;
+    //    }
+    //    datasize -= 2;
+    //    qDebug() << datasize;
+    //    for(int i=0; i<datasize; i++){
+    //        QString filename_reward = QString(memoryPath + "/" + QString::number(i) + "/reward.txt");
+    //        std::vector<float> tmpreward;
+    //        loaddata(filename_reward.toStdString(), tmpreward);
+    //        rewards.push_back(tmpreward[0]);
+    //        if(tmpreward[0]==0){
+    //            QDir dir(filename_reward);
+    //            if (!dir.removeRecursively()) {
+    //                qCritical() << "[Warning] Useless data cannot be deleted : " << i;
+    //            }
+    //            tmpreward[0] = -10000;
+    //            savedata(filename_reward, tmpreward);
+    //            count++;
+    //            qDebug() << i;
+    //        }
+    //    }
+    //    qDebug() << count;
+    //    qDebug() << datasize;
 
-//    savedata("/home/cpii/storage_d1/RL1/SAC/model_rewards_160episode_datas.txt", rewards);
-
-//    return 0;
+    //    savedata("/home/cpii/storage_d1/RL1/SAC/model_rewards_160episode_datas.txt", rewards);
+
+    //    return 0;
 
-//    qDebug() << "Loading memory";
-
-//    int dataid;
+    //    qDebug() << "Loading memory";
+
+    //    int dataid;
 
-//    QString filename_memorysize = QString(memoryPath + "/memorysize.txt");
-//    std::vector<float> memorysize;
-//    loaddata(filename_memorysize.toStdString(), memorysize);
-//    float datasize = memorysize[0];
+    //    QString filename_memorysize = QString(memoryPath + "/memorysize.txt");
+    //    std::vector<float> memorysize;
+    //    loaddata(filename_memorysize.toStdString(), memorysize);
+    //    float datasize = memorysize[0];
 
-//    QString filename_dataid = QString(memoryPath + "/dataid.txt");
-//    std::vector<float> saved_dataid;
-//    loaddata(filename_dataid.toStdString(), saved_dataid);
-//    dataid = saved_dataid[0]+1;
+    //    QString filename_dataid = QString(memoryPath + "/dataid.txt");
+    //    std::vector<float> saved_dataid;
+    //    loaddata(filename_dataid.toStdString(), saved_dataid);
+    //    dataid = saved_dataid[0]+1;
 
 
-//    for(int i=0; i<datasize; i++){
-//        qDebug() << "Memory loading: [" << i+1 << "/" << datasize << "]" ;
-//        QString filename_id = memoryPath + QString("/%1").arg(dataid-datasize+i);
+    //    for(int i=0; i<datasize; i++){
+    //        qDebug() << "Memory loading: [" << i+1 << "/" << datasize << "]" ;
+    //        QString filename_id = memoryPath + QString("/%1").arg(dataid-datasize+i);
 
-//        // Load string(.txt)
-//        QString filename_before_state = QString(filename_id + "/before_state.txt");
-//        std::vector<float> before_state_vector;
-//        loaddata(filename_before_state.toStdString(), before_state_vector);
-//        torch::Tensor before_state_tensor = torch::from_blob(before_state_vector.data(), { 262147 }, torch::kFloat);
+    //        // Load string(.txt)
+    //        QString filename_before_state = QString(filename_id + "/before_state.txt");
+    //        std::vector<float> before_state_vector;
+    //        loaddata(filename_before_state.toStdString(), before_state_vector);
+    //        torch::Tensor before_state_tensor = torch::from_blob(before_state_vector.data(), { 262147 }, torch::kFloat);
 
-//        QString filename_place_point = QString(filename_id + "/place_point.txt");
-//        std::vector<float> place_point_vector;
-//        loaddata(filename_place_point.toStdString(), place_point_vector);
-//        torch::Tensor place_point_tensor = torch::from_blob(place_point_vector.data(), { 3 }, torch::kFloat);
+    //        QString filename_place_point = QString(filename_id + "/place_point.txt");
+    //        std::vector<float> place_point_vector;
+    //        loaddata(filename_place_point.toStdString(), place_point_vector);
+    //        torch::Tensor place_point_tensor = torch::from_blob(place_point_vector.data(), { 3 }, torch::kFloat);
 
-//        QString filename_reward = QString(filename_id + "/reward.txt");
-//        std::vector<float> reward_vector;
-//        loaddata(filename_reward.toStdString(), reward_vector);
-//        torch::Tensor reward_tensor = torch::from_blob(reward_vector.data(), { 1 }, torch::kFloat);
+    //        QString filename_reward = QString(filename_id + "/reward.txt");
+    //        std::vector<float> reward_vector;
+    //        loaddata(filename_reward.toStdString(), reward_vector);
+    //        torch::Tensor reward_tensor = torch::from_blob(reward_vector.data(), { 1 }, torch::kFloat);
 
-//        QString filename_done = QString(filename_id + "/done.txt");
-//        std::vector<float> done_vector;
-//        loaddata(filename_done.toStdString(), done_vector);
-//        torch::Tensor done_tensor = torch::from_blob(done_vector.data(), { 1 }, torch::kFloat);
+    //        QString filename_done = QString(filename_id + "/done.txt");
+    //        std::vector<float> done_vector;
+    //        loaddata(filename_done.toStdString(), done_vector);
+    //        torch::Tensor done_tensor = torch::from_blob(done_vector.data(), { 1 }, torch::kFloat);
 
-//        QString filename_after_state = QString(filename_id + "/after_state.txt");
-//        std::vector<float> after_state_vector;
-//        loaddata(filename_after_state.toStdString(), after_state_vector);
-//        torch::Tensor after_state_tensor = torch::from_blob(after_state_vector.data(), { 262147 }, torch::kFloat);
+    //        QString filename_after_state = QString(filename_id + "/after_state.txt");
+    //        std::vector<float> after_state_vector;
+    //        loaddata(filename_after_state.toStdString(), after_state_vector);
+    //        torch::Tensor after_state_tensor = torch::from_blob(after_state_vector.data(), { 262147 }, torch::kFloat);
 
-//        // Trans to tensor and save
-//        QString sfilename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
-//        torch::save(before_state_tensor, sfilename_before_state_tensor.toStdString());
+    //        // Trans to tensor and save
+    //        QString sfilename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
+    //        torch::save(before_state_tensor, sfilename_before_state_tensor.toStdString());
 
-//        QString sfilename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
-//        torch::save(place_point_tensor, sfilename_place_point_tensor.toStdString());
+    //        QString sfilename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
+    //        torch::save(place_point_tensor, sfilename_place_point_tensor.toStdString());
 
-//        QString sfilename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
-//        torch::save(reward_tensor, sfilename_reward_tensor.toStdString());
+    //        QString sfilename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
+    //        torch::save(reward_tensor, sfilename_reward_tensor.toStdString());
 
-//        QString sfilename_done_tensor = QString(filename_id + "/done_tensor.pt");
-//        torch::save(done_tensor, sfilename_done_tensor.toStdString());
+    //        QString sfilename_done_tensor = QString(filename_id + "/done_tensor.pt");
+    //        torch::save(done_tensor, sfilename_done_tensor.toStdString());
 
-//        QString sfilename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
-//        torch::save(after_state_tensor, sfilename_after_state_tensor.toStdString());
-//    }
+    //        QString sfilename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
+    //        torch::save(after_state_tensor, sfilename_after_state_tensor.toStdString());
+    //    }
 
-//    return 0;
+    //    return 0;
 
-//    std::vector<float> tt{1, 2, 3, 4, 5, 6, 7, 8};
-//    torch::Tensor tt_tensor = torch::from_blob(tt.data(), { 2, 4 }, at::kFloat);
+    //    std::vector<float> tt{1, 2, 3, 4, 5, 6, 7, 8};
+    //    torch::Tensor tt_tensor = torch::from_blob(tt.data(), { 2, 4 }, at::kFloat);
 
-//    std::vector<float> tt2{1, 1, 1, 2};
-//    torch::Tensor tt2_tensor = torch::from_blob(tt2.data(), { 1, 4 }, at::kFloat);
+    //    std::vector<float> tt2{1, 1, 1, 2};
+    //    torch::Tensor tt2_tensor = torch::from_blob(tt2.data(), { 1, 4 }, at::kFloat);
 
-//    tt_tensor = torch::add(tt_tensor, tt2_tensor);
+    //    tt_tensor = torch::add(tt_tensor, tt2_tensor);
 
-//    std::cout << "tt_tensor: " << tt_tensor << std::endl;
+    //    std::cout << "tt_tensor: " << tt_tensor << std::endl;
 
-//    return 0;
+    //    return 0;
 
-//    std::vector<float> tt2{5, 6, 7, 8};
-//    torch::Tensor tt2_tensor = torch::from_blob(tt2.data(), { 1, 2, 2 }, at::kFloat);
+    //    std::vector<float> tt2{5, 6, 7, 8};
+    //    torch::Tensor tt2_tensor = torch::from_blob(tt2.data(), { 1, 2, 2 }, at::kFloat);
 
-//    torch::Tensor cat = torch::cat({tt_tensor, tt2_tensor}, 0);
-
-//    torch::Tensor view = cat.view({2,4});
+    //    torch::Tensor cat = torch::cat({tt_tensor, tt2_tensor}, 0);
+
+    //    torch::Tensor view = cat.view({2,4});
 
-//    std::cout << "tt_tensor: " << tt_tensor << std::endl
-//              << "tt2_tensor: " << tt2_tensor << std::endl
-//              << "cat: " << cat << std::endl
-//              << "view: " << view << std::endl;
+    //    std::cout << "tt_tensor: " << tt_tensor << std::endl
+    //              << "tt2_tensor: " << tt2_tensor << std::endl
+    //              << "cat: " << cat << std::endl
+    //              << "view: " << view << std::endl;
 
-//    return 0;
-
-//    std::vector<float> t{1, 2, 3};
-//    torch::Tensor pick_point_tensor = torch::from_blob(t.data(), { 3 }, at::kFloat);
-//    pick_point_tensor = pick_point_tensor.to(torch::kCPU);
-
-//    std::vector<float> t2{4, 5, 6};
-//    torch::Tensor src_tensor = torch::from_blob(t2.data(), { 1, 3 }, at::kFloat);
-//    auto src_tensor_flatten = torch::flatten(src_tensor);
-
-//    std::vector<float> t3{7, 8, 9, 10, 11, 12};
-//    torch::Tensor src_height_tensor = torch::from_blob(t3.data(), { 1, 2, 3 }, at::kFloat);
-//    auto src_height_tensor_flatten = torch::flatten(src_height_tensor);
-
-//    auto before_state = torch::cat({ pick_point_tensor, src_tensor_flatten, src_height_tensor_flatten });
-
-//    std::cout << before_state << std::endl;
-
-//    before_state = torch::reshape(before_state, {3,4});
-
-//    std::cout << before_state << std::endl;
-
-//    return 0;
-
-//    if ( !mDetector ) {
-//        mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
-//    }
-
-//    float angle = 0;
-//    cv::Mat rotatedImg;
-//    QImage rotatedImgqt;
-//    warped_image = cv::imread("/home/cpii/projects/data/0/after_warped_image.jpg");
-//    QString filename_Src = QString("/home/cpii/projects/data/detect.jpg");
-//    QByteArray filename_Srcc = filename_Src.toLocal8Bit();
-//    const char *filename_Srccc = filename_Srcc.data();
-//    float conf_before;
-//    for(int a = 0; a < 36; a++){
-//        rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
-
-//        QMatrix r;
-
-//        r.rotate(angle*10.0);
-
-//        rotatedImgqt = rotatedImgqt.transformed(r);
-
-//        rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
-
-//        std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
-
-//        if(test_result.size()>0){
-//            for(int i=0; i<test_result.size(); i++){
-//                if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob){
-//                    conf_before = test_result[i].prob;
-//                    cv::imwrite(filename_Srccc, rotatedImg);
-//                }
-//            }
-//        }
-//        angle+=1;
-//    }
-//    qDebug() << "Classcification confidence level before action: " << conf_before;
-
-//    torch::Device device(torch::kCPU);
-//    if (torch::cuda::is_available()) {
-//        std::cout << "CUDA is available! Training on GPU." << std::endl;
-//        device = torch::Device(torch::kCUDA);
-//    }
-
-//    qDebug() << "Creating models";
-
-//    auto policy = Policy();
-//    auto target_policy = Policy();
-//    auto critic = Critic();
-//    auto target_critic = Critic();
-
-//    policy->to(device);
-//    critic->to(device);
-//    target_policy->to(device);
-//    target_critic->to(device);
-
-//    qDebug() << "Creating optimizer";
-
-//    torch::optim::Adam policy_optimizer(policy->parameters(), torch::optim::AdamOptions(lrp));
-//    torch::optim::Adam critic_optimizer(critic->parameters(), torch::optim::AdamOptions(lrc));
-
-//    qDebug() << "Loading models";
-//    QString Pmodelname = "policy_model_t.pt";
-//    QString Poptimodelname = "policy_optimizer_t.pt";
-//    QString Cmodelname = "critic_model_t.pt";
-//    QString Coptimodelname = "critic_optimizer_t.pt";
-//    torch::load(policy, Pmodelname.toStdString());
-//    torch::load(policy_optimizer, Poptimodelname.toStdString());
-//    torch::load(critic, Cmodelname.toStdString());
-//    torch::load(critic_optimizer, Coptimodelname.toStdString());
-
-//    torch::AutoGradMode disable_grad_hardcopy(false);
-
-//    qDebug() << "Copying parameters to target models";
-//    for(size_t i=0; i < target_policy->parameters().size(); i++){
-//        target_policy->parameters()[i].copy_(policy->parameters()[i]);
-//    //    std::cout << "Pt: \n" << target_policy->parameters()[i].sizes() << std::endl;
-//    //    std::cout << "P: \n" << policy->parameters()[i].sizes() << std::endl;
-//    }
-
-//    for(size_t i=0; i < target_critic->parameters().size(); i++){
-//        target_critic->parameters()[i].copy_(critic->parameters()[i]);
-//    //    std::cout << "Ct: \n" << target_critic->parameters()[i].sizes() << std::endl;
-//    //    std::cout << "C: \n" << critic->parameters()[i].sizes() << std::endl;
-//    }
-//    //torch::AutoGradMode enable_grad_hardcopy(true);
-
-
-//    std::vector<float> s(262147);
-//    std::vector<float> s2(262147);
-//    std::vector<float> a{3.5, 0.53, -4.5};
-//    std::vector<float> r{200};
-//    std::vector<float> d{0};
-//    for(int i=0;i<262147;i++){
-//        s2[i] = (rand()%200)/10.0f;
-//    }
-//    for(int i=0;i<262147;i++){
-//        s[i] = 0.354;
-//    }
-//    auto s1_batch = torch::from_blob(s.data(), { 262147 }, at::kFloat);
-//    auto s21_batch = torch::from_blob(s2.data(), { 262147 }, at::kFloat);
-//    auto a1_batch = torch::from_blob(a.data(), { 3 }, at::kFloat);
-//    auto r1_batch = torch::from_blob(r.data(), { 1 }, at::kFloat);
-//    auto d1_batch = torch::from_blob(d.data(), { 1 }, at::kFloat);
-
-//    memory.push_back({
-//        s1_batch.clone(),
-//        a1_batch.clone(),
-//        r1_batch.clone(),
-//        d1_batch.clone(),
-//        s21_batch.clone(),
-//        });
-
-//    a = std::vector<float> {1.2, 0.532, 1.33};
-//    a1_batch = torch::from_blob(a.data(), { 3 }, at::kFloat);
-
-//    for(int i=0;i<262147;i++){
-//        s2[i] = (rand()%200)/10.0f;
-//    }
-
-//    for(int i=0;i<262147;i++){
-//        s[i] = 0.123;
-//    }
-
-//    s1_batch = torch::from_blob(s.data(), { 262147 }, at::kFloat);
-//    s21_batch = torch::from_blob(s2.data(), { 262147 }, at::kFloat);
-
-//    memory.push_back({
-//        s1_batch.clone(),
-//        a1_batch.clone(),
-//        r1_batch.clone(),
-//        d1_batch.clone(),
-//        s21_batch.clone(),
-//        });
-
-//    r = std::vector<float> {100};
-//    r1_batch = torch::from_blob(r.data(), { 1 }, at::kFloat);
-
-//    memory.push_back({
-//        s1_batch.clone(),
-//        a1_batch.clone(),
-//        r1_batch.clone(),
-//        d1_batch.clone(),
-//        s21_batch.clone()
-//        });
-
-
-//    int randomdata = 0;
-//    std::vector<torch::Tensor> s_data(3), a_data(3), r_data(3), d_data(3), s2_data(3);
-//    torch::Tensor s_batch, a_batch, r_batch, d_batch, s2_batch;
-
-
-//    for (int i = 0; i < 3; i++) {
-//        s_data[i] = torch::unsqueeze(memory[i+randomdata].before_state, 0);
-//        a_data[i] = torch::unsqueeze(memory[i+randomdata].place_point, 0);
-//        r_data[i] = torch::unsqueeze(memory[i+randomdata].reward, 0);
-//        d_data[i] = torch::unsqueeze(memory[i+randomdata].done, 0);
-//        s2_data[i] = torch::unsqueeze(memory[i+randomdata].after_state, 0);
-//    }
-
-
-//    s_batch = s_data[0]; a_batch = a_data[0]; r_batch = r_data[0]; d_batch = d_data[0]; s2_batch = s2_data[0];
-//    for (int i = 1; i < 3; i++) {
-//        //std::cout << s_data[i].sizes() << std::endl << s_batch.sizes() << std::endl;
-//        s_batch = torch::cat({ s_batch, s_data[i] }, 0);
-//        //std::cout << a_data[i].sizes() << std::endl << a_batch.sizes() << std::endl;
-//        a_batch = torch::cat({ a_batch, a_data[i] }, 0);
-//        //std::cout << r_data[i].sizes() << std::endl << r_batch.sizes() << std::endl;
-//        r_batch = torch::cat({ r_batch, r_data[i] }, 0);
-//        //std::cout << d_data[i].sizes() << std::endl << d_batch.sizes() << std::endl;
-//        d_batch = torch::cat({ d_batch, d_data[i] }, 0);
-//        //std::cout << s2_data[i].sizes() << std::endl << s2_batch.sizes() << std::endl;
-//        s2_batch = torch::cat({ s2_batch, s2_data[i] }, 0);
-//    }
-
-//    std::cout << s_batch.mean() << std::endl
-//              << a_batch << std::endl
-//              << a_batch.mean() << std::endl
-//              << r_batch << std::endl
-//              << r_batch.mean() << std::endl
-//              << d_batch << std::endl
-//              << d_batch.mean() << std::endl
-//              << s2_batch.mean() << std::endl;
-
-//    s_batch = s_batch.to(device);
-//    auto pout1 = policy->forward(s_batch);
-//    std::cout << "pout1: " << pout1;
-
-//    s_batch = s_batch.to(device);
-//    auto pout2 = policy->forward(s_batch);
-//    std::cout << "pout2: " << pout2;
-
-//    s_batch = s_batch.to(device);
-//    auto pout3 = policy->forward(s_batch);
-//    std::cout << "pout3: " << pout3;
-
-//    return 0;
-
-//    s_batch = s_batch.to(device);
-//    a_batch = a_batch.to(device);
-//    r_batch = r_batch.to(device);
-//    d_batch = d_batch.to(device);
-//    s2_batch = s2_batch.to(device);
-
-//    qDebug() << "\033[1;33Training critic model\033[0m";
-
-//    auto a2_batch = target_policy->forward(s2_batch).to(device);
-//    std::cout << "a2_batch: " << a2_batch << std::endl;
-//    auto target_q = target_critic->forward(a2_batch, s2_batch).to(device);
-//    std::cout << "target_q: " << target_q << std::endl;
-//    std::cout << r_batch.type() << " " << d_batch.type() << " "<< target_q.type() << std::endl;
-//    auto y = r_batch + (1.0 - d_batch) * GAMMA * target_q;
-//    std::cout << "y: " << y << std::endl;
-//    auto q = critic->forward(a_batch, s_batch);
-//    std::cout << "q: " << q << std::endl;
-
-//    auto critic_loss = torch::mse_loss(q, y.detach());
-//    std::cout << "Critic loss: " << critic_loss;
-//    float critic_lossf = critic_loss.item().toFloat();
-//    std::cout << critic_lossf << std::endl;
-//    critic_optimizer.zero_grad();
-//    std::cout << critic_loss << std::endl;
-//    critic_loss.backward();
-//    critic_optimizer.step();
-
-//    qDebug() << "\033[1;33mCritic optimizer step\033[0m";
-
-//    // Policy loss
-//    qDebug() << "\033[1;33mTraining policy model\033[0m";
-//    auto a_predict = policy->forward(s_batch).to(device);
-//    std::cout << "a_predict: " << a_predict;
-//    auto policy_loss = -critic->forward(a_predict, s_batch);
-//    std::cout << "policyloss: " << policy_loss << std::endl;
-//    policy_loss = policy_loss.mean();
-//    std::cout << "policyloss mean: " << policy_loss << std::endl;
-//    auto policy_lossf = policy_loss.item().toFloat();
-//    std::cout << policy_lossf << std::endl;
-//    policy_optimizer.zero_grad();
-//    std::cout << policy_loss.type() << std::endl;
-//    policy_loss.backward();
-//    policy_optimizer.step();
-
-//    qDebug() << "\033[1;33mPolicy optimizer step\033[0m";
-
-//    QString Pmodelname = "policy_model_t.pt";
-//    QString Poptimodelname = "policy_optimizer_t.pt";
-//    QString Cmodelname = "critic_model_t.pt";
-//    QString Coptimodelname = "critic_optimizer_t.pt";
-//    torch::save(policy, Pmodelname.toStdString());
-//    torch::save(policy_optimizer, Poptimodelname.toStdString());
-//    torch::save(critic, Cmodelname.toStdString());
-//    torch::save(critic_optimizer, Coptimodelname.toStdString());
-
-//    auto pout = policy->forward(s_batch);
-//    std::cout << "pout: " << pout;
-
-//    return 0;
-
-
-//    qDebug() << "train";
-
-//    policy->train();
-
-//    auto a2_batch = target_policy->forward(s2_batch).to(device);
-//    std::cout << a2_batch << std::endl;
-//    auto target_q = target_critic->forward(a2_batch, s2_batch).to(device);
-//    std::cout << target_q << std::endl;
-//    //std::cout << r_batch.type() << " " << << d_batch.type() << " "<< target_q.type() << std::endl;
-//    auto y = r_batch + (1.0 - d_batch) * GAMMA * target_q;
-//    std::cout << "y: " << y << std::endl;
-//    auto q = critic->forward(a_batch, s_batch);
-//    std::cout << "q: " << q << std::endl;
-
-//    auto critic_loss = torch::mse_loss(q, y.detach());
-//    std::cout << "Critic loss: " << critic_loss << std::endl;
-//    critic_optimizer.zero_grad();
-//    critic_loss.backward();
-//    critic_optimizer.step();
-
-//    qDebug() << "\033[1;33mCritic optimizer step\033[0m";
-
-//    // Policy loss
-//    qDebug() << "\033[1;33mTraining policy model\033[0m";
-//    auto a_predict = policy->forward(s_batch).to(device);
-//    std::cout << "a_predict: " << a_predict << std::endl;
-//    auto policy_loss = -critic->forward(a_predict, s_batch);
-//    std::cout << "policyloss: " << policy_loss << std::endl;
-//    policy_loss = policy_loss.mean();
-//    std::cout << "policyloss mean: " << policy_loss << std::endl;
-//    std::cout << policy_loss.type() << std::endl;
-//    policy_optimizer.zero_grad();
-//    policy_loss.backward();
-//    policy_optimizer.step();
-
-//    return 0;
-
+    //    return 0;
+
+    //    std::vector<float> t{1, 2, 3};
+    //    torch::Tensor pick_point_tensor = torch::from_blob(t.data(), { 3 }, at::kFloat);
+    //    pick_point_tensor = pick_point_tensor.to(torch::kCPU);
+
+    //    std::vector<float> t2{4, 5, 6};
+    //    torch::Tensor src_tensor = torch::from_blob(t2.data(), { 1, 3 }, at::kFloat);
+    //    auto src_tensor_flatten = torch::flatten(src_tensor);
+
+    //    std::vector<float> t3{7, 8, 9, 10, 11, 12};
+    //    torch::Tensor src_height_tensor = torch::from_blob(t3.data(), { 1, 2, 3 }, at::kFloat);
+    //    auto src_height_tensor_flatten = torch::flatten(src_height_tensor);
+
+    //    auto before_state = torch::cat({ pick_point_tensor, src_tensor_flatten, src_height_tensor_flatten });
+
+    //    std::cout << before_state << std::endl;
+
+    //    before_state = torch::reshape(before_state, {3,4});
+
+    //    std::cout << before_state << std::endl;
+
+    //    return 0;
+
+    //    if ( !mDetector ) {
+    //        mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
+    //    }
+
+    //    float angle = 0;
+    //    cv::Mat rotatedImg;
+    //    QImage rotatedImgqt;
+    //    warped_image = cv::imread("/home/cpii/projects/data/0/after_warped_image.jpg");
+    //    QString filename_Src = QString("/home/cpii/projects/data/detect.jpg");
+    //    QByteArray filename_Srcc = filename_Src.toLocal8Bit();
+    //    const char *filename_Srccc = filename_Srcc.data();
+    //    float conf_before;
+    //    for(int a = 0; a < 36; a++){
+    //        rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+
+    //        QMatrix r;
+
+    //        r.rotate(angle*10.0);
+
+    //        rotatedImgqt = rotatedImgqt.transformed(r);
+
+    //        rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+
+    //        std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+
+    //        if(test_result.size()>0){
+    //            for(int i=0; i<test_result.size(); i++){
+    //                if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob){
+    //                    conf_before = test_result[i].prob;
+    //                    cv::imwrite(filename_Srccc, rotatedImg);
+    //                }
+    //            }
+    //        }
+    //        angle+=1;
+    //    }
+    //    qDebug() << "Classcification confidence level before action: " << conf_before;
+
+    //    torch::Device device(torch::kCPU);
+    //    if (torch::cuda::is_available()) {
+    //        std::cout << "CUDA is available! Training on GPU." << std::endl;
+    //        device = torch::Device(torch::kCUDA);
+    //    }
+
+    //    qDebug() << "Creating models";
+
+    //    auto policy = Policy();
+    //    auto target_policy = Policy();
+    //    auto critic = Critic();
+    //    auto target_critic = Critic();
+
+    //    policy->to(device);
+    //    critic->to(device);
+    //    target_policy->to(device);
+    //    target_critic->to(device);
+
+    //    qDebug() << "Creating optimizer";
+
+    //    torch::optim::Adam policy_optimizer(policy->parameters(), torch::optim::AdamOptions(lrp));
+    //    torch::optim::Adam critic_optimizer(critic->parameters(), torch::optim::AdamOptions(lrc));
+
+    //    qDebug() << "Loading models";
+    //    QString Pmodelname = "policy_model_t.pt";
+    //    QString Poptimodelname = "policy_optimizer_t.pt";
+    //    QString Cmodelname = "critic_model_t.pt";
+    //    QString Coptimodelname = "critic_optimizer_t.pt";
+    //    torch::load(policy, Pmodelname.toStdString());
+    //    torch::load(policy_optimizer, Poptimodelname.toStdString());
+    //    torch::load(critic, Cmodelname.toStdString());
+    //    torch::load(critic_optimizer, Coptimodelname.toStdString());
+
+    //    torch::AutoGradMode disable_grad_hardcopy(false);
+
+    //    qDebug() << "Copying parameters to target models";
+    //    for(size_t i=0; i < target_policy->parameters().size(); i++){
+    //        target_policy->parameters()[i].copy_(policy->parameters()[i]);
+    //    //    std::cout << "Pt: \n" << target_policy->parameters()[i].sizes() << std::endl;
+    //    //    std::cout << "P: \n" << policy->parameters()[i].sizes() << std::endl;
+    //    }
+
+    //    for(size_t i=0; i < target_critic->parameters().size(); i++){
+    //        target_critic->parameters()[i].copy_(critic->parameters()[i]);
+    //    //    std::cout << "Ct: \n" << target_critic->parameters()[i].sizes() << std::endl;
+    //    //    std::cout << "C: \n" << critic->parameters()[i].sizes() << std::endl;
+    //    }
+    //    //torch::AutoGradMode enable_grad_hardcopy(true);
+
+
+    //    std::vector<float> s(262147);
+    //    std::vector<float> s2(262147);
+    //    std::vector<float> a{3.5, 0.53, -4.5};
+    //    std::vector<float> r{200};
+    //    std::vector<float> d{0};
+    //    for(int i=0;i<262147;i++){
+    //        s2[i] = (rand()%200)/10.0f;
+    //    }
+    //    for(int i=0;i<262147;i++){
+    //        s[i] = 0.354;
+    //    }
+    //    auto s1_batch = torch::from_blob(s.data(), { 262147 }, at::kFloat);
+    //    auto s21_batch = torch::from_blob(s2.data(), { 262147 }, at::kFloat);
+    //    auto a1_batch = torch::from_blob(a.data(), { 3 }, at::kFloat);
+    //    auto r1_batch = torch::from_blob(r.data(), { 1 }, at::kFloat);
+    //    auto d1_batch = torch::from_blob(d.data(), { 1 }, at::kFloat);
+
+    //    memory.push_back({
+    //        s1_batch.clone(),
+    //        a1_batch.clone(),
+    //        r1_batch.clone(),
+    //        d1_batch.clone(),
+    //        s21_batch.clone(),
+    //        });
+
+    //    a = std::vector<float> {1.2, 0.532, 1.33};
+    //    a1_batch = torch::from_blob(a.data(), { 3 }, at::kFloat);
+
+    //    for(int i=0;i<262147;i++){
+    //        s2[i] = (rand()%200)/10.0f;
+    //    }
+
+    //    for(int i=0;i<262147;i++){
+    //        s[i] = 0.123;
+    //    }
+
+    //    s1_batch = torch::from_blob(s.data(), { 262147 }, at::kFloat);
+    //    s21_batch = torch::from_blob(s2.data(), { 262147 }, at::kFloat);
+
+    //    memory.push_back({
+    //        s1_batch.clone(),
+    //        a1_batch.clone(),
+    //        r1_batch.clone(),
+    //        d1_batch.clone(),
+    //        s21_batch.clone(),
+    //        });
+
+    //    r = std::vector<float> {100};
+    //    r1_batch = torch::from_blob(r.data(), { 1 }, at::kFloat);
+
+    //    memory.push_back({
+    //        s1_batch.clone(),
+    //        a1_batch.clone(),
+    //        r1_batch.clone(),
+    //        d1_batch.clone(),
+    //        s21_batch.clone()
+    //        });
+
+
+    //    int randomdata = 0;
+    //    std::vector<torch::Tensor> s_data(3), a_data(3), r_data(3), d_data(3), s2_data(3);
+    //    torch::Tensor s_batch, a_batch, r_batch, d_batch, s2_batch;
+
+
+    //    for (int i = 0; i < 3; i++) {
+    //        s_data[i] = torch::unsqueeze(memory[i+randomdata].before_state, 0);
+    //        a_data[i] = torch::unsqueeze(memory[i+randomdata].place_point, 0);
+    //        r_data[i] = torch::unsqueeze(memory[i+randomdata].reward, 0);
+    //        d_data[i] = torch::unsqueeze(memory[i+randomdata].done, 0);
+    //        s2_data[i] = torch::unsqueeze(memory[i+randomdata].after_state, 0);
+    //    }
+
+
+    //    s_batch = s_data[0]; a_batch = a_data[0]; r_batch = r_data[0]; d_batch = d_data[0]; s2_batch = s2_data[0];
+    //    for (int i = 1; i < 3; i++) {
+    //        //std::cout << s_data[i].sizes() << std::endl << s_batch.sizes() << std::endl;
+    //        s_batch = torch::cat({ s_batch, s_data[i] }, 0);
+    //        //std::cout << a_data[i].sizes() << std::endl << a_batch.sizes() << std::endl;
+    //        a_batch = torch::cat({ a_batch, a_data[i] }, 0);
+    //        //std::cout << r_data[i].sizes() << std::endl << r_batch.sizes() << std::endl;
+    //        r_batch = torch::cat({ r_batch, r_data[i] }, 0);
+    //        //std::cout << d_data[i].sizes() << std::endl << d_batch.sizes() << std::endl;
+    //        d_batch = torch::cat({ d_batch, d_data[i] }, 0);
+    //        //std::cout << s2_data[i].sizes() << std::endl << s2_batch.sizes() << std::endl;
+    //        s2_batch = torch::cat({ s2_batch, s2_data[i] }, 0);
+    //    }
+
+    //    std::cout << s_batch.mean() << std::endl
+    //              << a_batch << std::endl
+    //              << a_batch.mean() << std::endl
+    //              << r_batch << std::endl
+    //              << r_batch.mean() << std::endl
+    //              << d_batch << std::endl
+    //              << d_batch.mean() << std::endl
+    //              << s2_batch.mean() << std::endl;
+
+    //    s_batch = s_batch.to(device);
+    //    auto pout1 = policy->forward(s_batch);
+    //    std::cout << "pout1: " << pout1;
+
+    //    s_batch = s_batch.to(device);
+    //    auto pout2 = policy->forward(s_batch);
+    //    std::cout << "pout2: " << pout2;
+
+    //    s_batch = s_batch.to(device);
+    //    auto pout3 = policy->forward(s_batch);
+    //    std::cout << "pout3: " << pout3;
+
+    //    return 0;
+
+    //    s_batch = s_batch.to(device);
+    //    a_batch = a_batch.to(device);
+    //    r_batch = r_batch.to(device);
+    //    d_batch = d_batch.to(device);
+    //    s2_batch = s2_batch.to(device);
+
+    //    qDebug() << "\033[1;33Training critic model\033[0m";
+
+    //    auto a2_batch = target_policy->forward(s2_batch).to(device);
+    //    std::cout << "a2_batch: " << a2_batch << std::endl;
+    //    auto target_q = target_critic->forward(a2_batch, s2_batch).to(device);
+    //    std::cout << "target_q: " << target_q << std::endl;
+    //    std::cout << r_batch.type() << " " << d_batch.type() << " "<< target_q.type() << std::endl;
+    //    auto y = r_batch + (1.0 - d_batch) * GAMMA * target_q;
+    //    std::cout << "y: " << y << std::endl;
+    //    auto q = critic->forward(a_batch, s_batch);
+    //    std::cout << "q: " << q << std::endl;
+
+    //    auto critic_loss = torch::mse_loss(q, y.detach());
+    //    std::cout << "Critic loss: " << critic_loss;
+    //    float critic_lossf = critic_loss.item().toFloat();
+    //    std::cout << critic_lossf << std::endl;
+    //    critic_optimizer.zero_grad();
+    //    std::cout << critic_loss << std::endl;
+    //    critic_loss.backward();
+    //    critic_optimizer.step();
+
+    //    qDebug() << "\033[1;33mCritic optimizer step\033[0m";
+
+    //    // Policy loss
+    //    qDebug() << "\033[1;33mTraining policy model\033[0m";
+    //    auto a_predict = policy->forward(s_batch).to(device);
+    //    std::cout << "a_predict: " << a_predict;
+    //    auto policy_loss = -critic->forward(a_predict, s_batch);
+    //    std::cout << "policyloss: " << policy_loss << std::endl;
+    //    policy_loss = policy_loss.mean();
+    //    std::cout << "policyloss mean: " << policy_loss << std::endl;
+    //    auto policy_lossf = policy_loss.item().toFloat();
+    //    std::cout << policy_lossf << std::endl;
+    //    policy_optimizer.zero_grad();
+    //    std::cout << policy_loss.type() << std::endl;
+    //    policy_loss.backward();
+    //    policy_optimizer.step();
+
+    //    qDebug() << "\033[1;33mPolicy optimizer step\033[0m";
+
+    //    QString Pmodelname = "policy_model_t.pt";
+    //    QString Poptimodelname = "policy_optimizer_t.pt";
+    //    QString Cmodelname = "critic_model_t.pt";
+    //    QString Coptimodelname = "critic_optimizer_t.pt";
+    //    torch::save(policy, Pmodelname.toStdString());
+    //    torch::save(policy_optimizer, Poptimodelname.toStdString());
+    //    torch::save(critic, Cmodelname.toStdString());
+    //    torch::save(critic_optimizer, Coptimodelname.toStdString());
+
+    //    auto pout = policy->forward(s_batch);
+    //    std::cout << "pout: " << pout;
+
+    //    return 0;
+
+
+    //    qDebug() << "train";
+
+    //    policy->train();
+
+    //    auto a2_batch = target_policy->forward(s2_batch).to(device);
+    //    std::cout << a2_batch << std::endl;
+    //    auto target_q = target_critic->forward(a2_batch, s2_batch).to(device);
+    //    std::cout << target_q << std::endl;
+    //    //std::cout << r_batch.type() << " " << << d_batch.type() << " "<< target_q.type() << std::endl;
+    //    auto y = r_batch + (1.0 - d_batch) * GAMMA * target_q;
+    //    std::cout << "y: " << y << std::endl;
+    //    auto q = critic->forward(a_batch, s_batch);
+    //    std::cout << "q: " << q << std::endl;
+
+    //    auto critic_loss = torch::mse_loss(q, y.detach());
+    //    std::cout << "Critic loss: " << critic_loss << std::endl;
+    //    critic_optimizer.zero_grad();
+    //    critic_loss.backward();
+    //    critic_optimizer.step();
+
+    //    qDebug() << "\033[1;33mCritic optimizer step\033[0m";
+
+    //    // Policy loss
+    //    qDebug() << "\033[1;33mTraining policy model\033[0m";
+    //    auto a_predict = policy->forward(s_batch).to(device);
+    //    std::cout << "a_predict: " << a_predict << std::endl;
+    //    auto policy_loss = -critic->forward(a_predict, s_batch);
+    //    std::cout << "policyloss: " << policy_loss << std::endl;
+    //    policy_loss = policy_loss.mean();
+    //    std::cout << "policyloss mean: " << policy_loss << std::endl;
+    //    std::cout << policy_loss.type() << std::endl;
+    //    policy_optimizer.zero_grad();
+    //    policy_loss.backward();
+    //    policy_optimizer.step();
+
+    //    return 0;
+
+    create_paths();
+
+    RobotReset_RunCamera();
 
     return false;
 }
@@ -1858,7 +1953,7 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
                 Transformationmatrix_T2C = cv::Matx44f(rotM.at<double>(0,0), rotM.at<double>(0,1), rotM.at<double>(0,2), Po_97.x,
                                                        rotM.at<double>(1,0), rotM.at<double>(1,1), rotM.at<double>(1,2), Po_97.y,
                                                        rotM.at<double>(2,0), rotM.at<double>(2,1), rotM.at<double>(2,2), Po_97.z,
-                                                                       0.0f,                 0.0f,                 0.0f,    1.0f);
+                                                       0.0f,                 0.0f,                 0.0f,    1.0f);
 
                 rs2_project_color_pixel_to_depth_pixel(tmp_depth_point_98, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point_98);
                 int P_98 = int(tmp_depth_point_98[0])*depthh + (depthh-int(tmp_depth_point_98[1]));
@@ -1883,9 +1978,9 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
                 QVector4D Pt_99(dstMat_99(0,0)/scale_99, dstMat_99(0,1)/scale_99, dstMat_99(0,2)/scale_99, 1.0f);
                 double thetaY = asin(Pt_99.z()/0.9);
                 cv::Matx44f Rotatey = cv::Matx44f( cos(-thetaY), 0.0f, sin(-thetaY), 0.0f,
-                                                           0.0f, 1.0f,         0.0f, 0.0f,
-                                                  -sin(-thetaY), 0.0f, cos(-thetaY), 0.0f,
-                                                           0.0f, 0.0f,         0.0f, 1.0f);
+                                                   0.0f, 1.0f,         0.0f, 0.0f,
+                                                   -sin(-thetaY), 0.0f, cos(-thetaY), 0.0f,
+                                                   0.0f, 0.0f,         0.0f, 1.0f);
                 Transformationmatrix_T2C = Transformationmatrix_T2C * Rotatey;
 
                 roi_corners[0].x = round(roi_corners[0].x / markercount);
@@ -2000,8 +2095,8 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
                             auto future_camPt = QtConcurrent::run([&](){
                                 for (auto i=0; i<mPointCloud.size(); i++){
                                     points.push_back(QString("%1 %2 %3").arg(mPointCloud[i].x())
-                                                                        .arg(mPointCloud[i].y())
-                                                                        .arg(mPointCloud[i].z()).toStdString());
+                                                     .arg(mPointCloud[i].y())
+                                                     .arg(mPointCloud[i].z()).toStdString());
                                 }
 
                                 QString filename_points = QString(filename_dir + "/after_points.txt");
@@ -2031,155 +2126,159 @@ bool LP_Plugin_Garment_Manipulation::eventFilter(QObject *watched, QEvent *event
 
                                 const auto &&mat_inv = WarpMatrix.inv();
                                 const auto &&WW = 1.f/static_cast<float>(imageWidth)*warped_image_size.width,
-                                           &&HH = 1.f/static_cast<float>(imageHeight)*warped_image_size.height;
+                                        &&HH = 1.f/static_cast<float>(imageHeight)*warped_image_size.height;
                                 const auto *start_ = tablepointIDs.data();
 
                                 auto _future = QtConcurrent::map(tablepointIDs, [&](std::string &v){
-                                    const auto id = &v - start_;
-                                    int &&i = id / warped_image.cols;
-                                    int &&j = id % warped_image.cols;
-                                    cv::Point2f warpedp = {i * WW, j * HH};
-                                    cv::Point3f &&homogeneous = mat_inv * warpedp;
+                                        const auto id = &v - start_;
+                                        int &&i = id / warped_image.cols;
+                                        int &&j = id % warped_image.cols;
+                                        cv::Point2f warpedp = {i * WW, j * HH};
+                                        cv::Point3f &&homogeneous = mat_inv * warpedp;
 
-                                    float tmp_depth_point[2] = {0}, tmp_color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
-                                    rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
-                                    int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
-                        //            mTestP[i] = mPointCloud[tmpTableP];
-                                    tablepointIDs.at(id) = QString("%1").arg(tmpTableP).toStdString();
-                                });
-                                _future.waitForFinished();
-//                                for(int i=0; i<warped_image.cols; i++){
-//                                    const auto &&i_ = i*WW;
-//                                    for(int j=0; j<warped_image.rows; j++){
-//                                        cv::Point2f warpedp = {i_, j * HH};
-//                                        cv::Point3f &&homogeneous = mat_inv * warpedp;
-//                                        OritablepointIDs.emplace_back(homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z);
-//                                    }
-//                                }
-
-//                                //@!!!!!!!!!!!! The following part is WRONG!!!! The after depth should be averaged!!
-//                                std::vector<std::string> tablepointIDs;
-//                                auto depth = frames.get_depth_frame();
-//                        //        mTestP.resize(OritablepointIDs.size());
-//                                for (int i=0; i<OritablepointIDs.size(); i++){
-//                                    float tmp_depth_point[2] = {0}, tmp_color_point[2] = {OritablepointIDs[i].x, OritablepointIDs[i].y};
-//                                    rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
-//                                    int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
-//                        //            mTestP[i] = mPointCloud[tmpTableP];
-//                                    tablepointIDs.push_back(QString("%1").arg(tmpTableP).toStdString());
-//                                }
-
-                                QString filename_tablepointIDs = QString(filename_dir + "/after_tablepointIDs.txt");
-                                QByteArray filename_tablepointIDsc = filename_tablepointIDs.toLocal8Bit();
-                                const char *filename_tablepointIDscc = filename_tablepointIDsc.data();
-                                std::ofstream output_file2(filename_tablepointIDscc);
-                                std::ostream_iterator<std::string> output_iterator2(output_file2, "\n");
-                                std::copy(tablepointIDs.begin(), tablepointIDs.end(), output_iterator2);
+                                        float tmp_depth_point[2] = {0}, tmp_color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+                                rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
+                                int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
+                                //            mTestP[i] = mPointCloud[tmpTableP];
+                                tablepointIDs.at(id) = QString("%1").arg(tmpTableP).toStdString();
                             });
+                            _future.waitForFinished();
+                            //                                for(int i=0; i<warped_image.cols; i++){
+                            //                                    const auto &&i_ = i*WW;
+                            //                                    for(int j=0; j<warped_image.rows; j++){
+                            //                                        cv::Point2f warpedp = {i_, j * HH};
+                            //                                        cv::Point3f &&homogeneous = mat_inv * warpedp;
+                            //                                        OritablepointIDs.emplace_back(homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z);
+                            //                                    }
+                            //                                }
+
+                            //                                //@!!!!!!!!!!!! The following part is WRONG!!!! The after depth should be averaged!!
+                            //                                std::vector<std::string> tablepointIDs;
+                            //                                auto depth = frames.get_depth_frame();
+                            //                        //        mTestP.resize(OritablepointIDs.size());
+                            //                                for (int i=0; i<OritablepointIDs.size(); i++){
+                            //                                    float tmp_depth_point[2] = {0}, tmp_color_point[2] = {OritablepointIDs[i].x, OritablepointIDs[i].y};
+                            //                                    rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
+                            //                                    int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
+                            //                        //            mTestP[i] = mPointCloud[tmpTableP];
+                            //                                    tablepointIDs.push_back(QString("%1").arg(tmpTableP).toStdString());
+                            //                                }
+
+                            QString filename_tablepointIDs = QString(filename_dir + "/after_tablepointIDs.txt");
+                            QByteArray filename_tablepointIDsc = filename_tablepointIDs.toLocal8Bit();
+                            const char *filename_tablepointIDscc = filename_tablepointIDsc.data();
+                            std::ofstream output_file2(filename_tablepointIDscc);
+                            std::ostream_iterator<std::string> output_iterator2(output_file2, "\n");
+                            std::copy(tablepointIDs.begin(), tablepointIDs.end(), output_iterator2);
+                        });
 
 
-                            auto future_images = QtConcurrent::run([&](){
-                                // Save Src
-                                QString filename_Src = QString(filename_dir + "/after_Src.jpg");
-                                QByteArray filename_Srcc = filename_Src.toLocal8Bit();
-                                const char *filename_Srccc = filename_Srcc.data();
-                                cv::imwrite(filename_Srccc, Src);
+                        auto future_images = QtConcurrent::run([&](){
+                            // Save Src
+                            QString filename_Src = QString(filename_dir + "/after_Src.jpg");
+                            QByteArray filename_Srcc = filename_Src.toLocal8Bit();
+                            const char *filename_Srccc = filename_Srcc.data();
+                            cv::imwrite(filename_Srccc, Src);
 
-                                // Save warped image
-                                cv::Mat sub_image;
-                                sub_image = saved_warped_image - warped_image;
-                                auto mean = cv::mean(sub_image);
-                                qDebug() << "Pixel color diff mean: "<< mean[0] << " "<<mean[1]<< " "<< mean[2];
-                                if(mean[0]<1.0 && mean[1]<1.0 && mean[2]<1.0){
-                                    ++consecutiveUseless;
-                                    qDebug() << "\033[0;33mNothing Changed(mean<1.0) : " << ++useless_data << "\033[0m";
-                                } else {
-                                    QString filename_warped = QString(filename_dir + "/after_warped_image.jpg");
-                                    QByteArray filename_warpedc = filename_warped.toLocal8Bit();
-                                    const char *filename_warpedcc = filename_warpedc.data();
-                                    cv::imwrite(filename_warpedcc, warped_image);
-                                    consecutiveUseless = 0;
-                                }
-                            });
+                            // Save warped image
+                            cv::Mat sub_image;
+                            sub_image = saved_warped_image - warped_image;
+                            auto mean = cv::mean(sub_image);
+                            qDebug() << "Pixel color diff mean: "<< mean[0] << " "<<mean[1]<< " "<< mean[2];
+                            if(mean[0]<1.0 && mean[1]<1.0 && mean[2]<1.0){
+                                ++consecutiveUseless;
+                                qDebug() << "\033[0;33mNothing Changed(mean<1.0) : " << ++useless_data << "\033[0m";
+                            } else {
+                                QString filename_warped = QString(filename_dir + "/after_warped_image.jpg");
+                                QByteArray filename_warpedc = filename_warped.toLocal8Bit();
+                                const char *filename_warpedcc = filename_warpedc.data();
+                                cv::imwrite(filename_warpedcc, warped_image);
+                                consecutiveUseless = 0;
+                            }
+                        });
 
-                            future_images.waitForFinished();
-                            future_tablePt.waitForFinished();
-                            future_camPt.waitForFinished();
+                        future_images.waitForFinished();
+                        future_tablePt.waitForFinished();
+                        future_camPt.waitForFinished();
 
-                            qDebug() << QString("\033[1;32m[%2] Data %1 Saved \033[0m")
-                                        .arg(datanumber, 5, 10, QChar('.'))
-                                        .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
-                                        .toUtf8().data();
+                        qDebug() << QString("\033[1;32m[%2] Data %1 Saved \033[0m")
+                                    .arg(datanumber, 5, 10, QChar('.'))
+                                    .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
+                                    .toUtf8().data();
 
-                            datanumber++;
-                        }
-                        qDebug() << "Quit CollectData()";
-                    });
-                } else {
-                    if ( timerID > 0 ) {
-                        killTimer(timerID);
-                        timerID = 0;
+                        datanumber++;
                     }
-                    qDebug() << "Collecting Data, press SPACE to stop";
-                }
-            }
-        } else if ( e->button() == Qt::LeftButton ){
-            QWidget *glW = static_cast<QWidget*>(watched);
-
-            if(mGenerateData && mGetPlacePoint){
-                place_pointxy.setX(float(e->pos().x()) / glW->width());
-                place_pointxy.setY(float(e->pos().y()) / glW->height());
-                qDebug() << float(e->pos().x()) / glW->width()
-                         << float(e->pos().y()) / glW->height();
-                mGetPlacePoint = false;
-            }
-        }
-    } else if ( QEvent::KeyRelease == event->type()){
-        auto e = static_cast<QKeyEvent*>(event);
-
-        if ( e->key() == Qt::Key_Space ){
-            if (gStopFindWorkspace){
-                mRunCollectData = false;
-                mRunReinforcementLearning1 = false;
-                mRunReinforcementLearning2 = false;
-                mRunTrainRod = false;
-                mGenerateData = false;
-                QProcess exit;
-                QStringList exitarg;
-                exitarg << "/home/cpii/projects/scripts/exit.sh";
-                exit.startDetached("xterm", exitarg);
-                mLabel->setText("Right click to collect data\n"
-                                "Press buttons to start training\n"
-                                "Press 'G' to start generate data");
-            }
-        } else if ( e->key() == Qt::Key_T ) {
-            mShowInTableCoordinateFrame = !mShowInTableCoordinateFrame;
-        }
-//          else if ( e->key() == Qt::Key_R && gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mGenerateData){
-//            mRunReinforcementLearning1 = true;
-//            mLabel->setText("Training model, press SPACE to stop");
-//            Reinforcement_Learning_1();
-//        }
-          else if ( e->key() == Qt::Key_G && gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2 && !mRunTrainRod && !mGenerateData){
-            mGenerateData = true;
-            mLabel->setText("Generating data, press SPACE to stop\n"
-                            "Press 'D' to delete the last data");
-            Generate_Data();
-        } else if ( e->key() == Qt::Key_D && gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2 && !mRunTrainRod && mGenerateData){
-            QDir dir(QString("%1/%2").arg(datagen).arg(total_steps--));
-            if (!dir.removeRecursively()) {
-                qCritical() << "[Warning] Useless data cannot be deleted : " << total_steps+1;
+                    qDebug() << "Quit CollectData()";
+                });
             } else {
-                qDebug() << "Data deleted : " << total_steps+1;
+                if ( timerID > 0 ) {
+                    killTimer(timerID);
+                    timerID = 0;
+                }
+                qDebug() << "Collecting Data, press SPACE to stop";
             }
+        }
+    } else if ( e->button() == Qt::LeftButton ){
+        QWidget *glW = static_cast<QWidget*>(watched);
+
+        if(mGenerateData && mGetPlacePoint){
+            place_pointxy.setX(float(e->pos().x()) / glW->width());
+            place_pointxy.setY(float(e->pos().y()) / glW->height());
+            qDebug() << float(e->pos().x()) / glW->width()
+                     << float(e->pos().y()) / glW->height();
+            mGetPlacePoint = false;
         }
     }
+} else if ( QEvent::KeyRelease == event->type()){
+    auto e = static_cast<QKeyEvent*>(event);
 
-    return QObject::eventFilter(watched, event);
+    if ( e->key() == Qt::Key_Space ){
+        if (gStopFindWorkspace){
+            mRunCollectData = false;
+            mRunReinforcementLearning1 = false;
+            mRunReinforcementLearning2 = false;
+            mRunTrainRod = false;
+            mGenerateData = false;
+            mRunLPAP = false;
+            mRunTEXTILES = false;
+            QProcess exit;
+            QStringList exitarg;
+            exitarg << "/home/cpii/projects/scripts/exit.sh";
+            exit.startDetached("xterm", exitarg);
+            mLabel->setText("Right click to collect data\n"
+                            "Press buttons to start training\n"
+                            "Press 'G' to start generate data");
+        }
+    } else if ( e->key() == Qt::Key_T ) {
+        mShowInTableCoordinateFrame = !mShowInTableCoordinateFrame;
+    }
+    //          else if ( e->key() == Qt::Key_R && gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mGenerateData){
+    //            mRunReinforcementLearning1 = true;
+    //            mLabel->setText("Training model, press SPACE to stop");
+    //            Reinforcement_Learning_1();
+    //        }
+    else if ( e->key() == Qt::Key_G && gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+              && !mRunTrainRod && !mGenerateData && !mRunLPAP && !mRunTEXTILES){
+        mGenerateData = true;
+        mLabel->setText("Generating data, press SPACE to stop\n"
+                        "Press 'D' to delete the last data");
+        Generate_Data();
+    } else if ( e->key() == Qt::Key_D && gPlan && !mRunCollectData && !mRunReinforcementLearning1 && !mRunReinforcementLearning2
+                && !mRunTrainRod && mGenerateData && !mRunLPAP && !mRunTEXTILES){
+        QDir dir(QString("%1/%2").arg(datagen).arg(total_steps--));
+        if (!dir.removeRecursively()) {
+            qCritical() << "[Warning] Useless data cannot be deleted : " << total_steps+1;
+        } else {
+            qDebug() << "Data deleted : " << total_steps+1;
+        }
+    }
+}
+
+return QObject::eventFilter(watched, event);
 }
 
 bool LP_Plugin_Garment_Manipulation::saveCameraParams(const std::string &filename, cv::Size imageSize, float aspectRatio, int flags,
-                             const cv::Mat &cameraMatrix, const cv::Mat &distCoeffs, double totalAvgErr) {
+                                                      const cv::Mat &cameraMatrix, const cv::Mat &distCoeffs, double totalAvgErr) {
     cv::FileStorage fs(filename, cv::FileStorage::WRITE);
     if(!fs.isOpened())
         return false;
@@ -2240,8 +2339,8 @@ void LP_Plugin_Garment_Manipulation::calibrate()
     if (!inputVideo.isOpened()) {
         std::cerr << "ERROR: Could not open camera "  << std::endl;
         return;
-     }
-   // }
+    }
+    // }
 
     cv::Mat frame1;
     inputVideo >> frame1;
@@ -2262,7 +2361,7 @@ void LP_Plugin_Garment_Manipulation::calibrate()
         cv::Mat currentCharucoCorners, currentCharucoIds;
         if(ids.size() > 0)
             cv::aruco::interpolateCornersCharuco(corners, ids, image, charucoboard, currentCharucoCorners,
-                                             currentCharucoIds);
+                                                 currentCharucoIds);
 
         // draw results
         image.copyTo(imageCopy);
@@ -2272,9 +2371,9 @@ void LP_Plugin_Garment_Manipulation::calibrate()
             cv::aruco::drawDetectedCornersCharuco(imageCopy, currentCharucoCorners, currentCharucoIds);
 
         cv::putText(imageCopy, "Press 'c' to add current frame. 'ESC' to finish and calibrate",
-                cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 0), 2);
+                    cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 0), 2);
 
-//        cv::imshow("out", imageCopy);
+        //        cv::imshow("out", imageCopy);
         char key = (char)cv::waitKey(30);
         if(key == 27) break;
         if(key == 'c' && ids.size() > 0) {
@@ -2314,8 +2413,8 @@ void LP_Plugin_Garment_Manipulation::calibrate()
         // interpolate using camera parameters
         cv::Mat currentCharucoCorners, currentCharucoIds;
         cv::aruco::interpolateCornersCharuco(allCorners[i], allIds[i], allImgs[i], charucoboard,
-                                         currentCharucoCorners, currentCharucoIds, cameraMatrix,
-                                         distCoeffs);
+                                             currentCharucoCorners, currentCharucoIds, cameraMatrix,
+                                             distCoeffs);
 
         allCharucoCorners.push_back(currentCharucoCorners);
         allCharucoIds.push_back(currentCharucoIds);
@@ -2329,8 +2428,8 @@ void LP_Plugin_Garment_Manipulation::calibrate()
 
     // calibrate camera using charuco
     repError =
-        cv::aruco::calibrateCameraCharuco(allCharucoCorners, allCharucoIds, charucoboard, imgSize,
-                                      cameraMatrix, distCoeffs, rvecs, tvecs, calibrationFlags);
+            cv::aruco::calibrateCameraCharuco(allCharucoCorners, allCharucoIds, charucoboard, imgSize,
+                                              cameraMatrix, distCoeffs, rvecs, tvecs, calibrationFlags);
 
     bool saveOk =  saveCameraParams("cam_cal_165", imgSize, aspectRatio, calibrationFlags,
                                     cameraMatrix, distCoeffs, repError);
@@ -2367,22 +2466,22 @@ bool LP_Plugin_Garment_Manipulation::resetRobotPosition()
     file.setPermissions(QFileDevice::Permissions(1909));
     QTextStream stream(&file);
     stream << "#!/bin/bash" << "\n"
-          << "\n"
-          << "cd" << "\n"
-          << "\n"
-          << "source /opt/ros/foxy/setup.bash" << "\n"
-          << "\n"
-          << "source ~/ws_moveit2/install/setup.bash" << "\n"
-          << "\n"
-          << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-          << "\n"
-          << "cd tm_robot_gripper/" << "\n"
-          << "\n"
-          << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-          << "\n"
-          << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 1, positions: [-1.025, -0.29, 1.952, -0.1, 1.57, 0.545], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-          //<< "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-          << "\n";
+           << "\n"
+           << "cd" << "\n"
+           << "\n"
+           << "source /opt/ros/foxy/setup.bash" << "\n"
+           << "\n"
+           << "source ~/ws_moveit2/install/setup.bash" << "\n"
+           << "\n"
+           << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+           << "\n"
+           << "cd tm_robot_gripper/" << "\n"
+           << "\n"
+           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+           << "\n"
+           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 1, positions: [-1.025, -0.29, 1.952, -0.1, 1.57, 0.545], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+              //<< "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+           << "\n";
 
     file.close();
     QProcess proc;
@@ -2391,14 +2490,61 @@ bool LP_Plugin_Garment_Manipulation::resetRobotPosition()
     proc.start("xterm", args);
     constexpr int timeout_count = 60000; //60000 mseconds
     if ( proc.waitForFinished(timeout_count)) {
-       qDebug() << "Robot reset finished";
-       ++gRobotResetCount;
+        qDebug() << "Robot reset finished";
+        ++gRobotResetCount;
     } else {
-       qWarning() << QString("Robot reset not finished within %1s").arg(timeout_count*0.001);
-       qWarning() << proc.errorString();
-       return false;
+        qWarning() << QString("Robot reset not finished within %1s").arg(timeout_count*0.001);
+        qWarning() << proc.errorString();
+        return false;
     }
     return true;
+}
+
+void LP_Plugin_Garment_Manipulation::create_paths(){
+    if(!QDir(memoryPath).exists()){
+        QDir().mkdir(memoryPath);
+    }
+    if(!QDir(modelPath).exists()){
+        QDir().mkdir(modelPath);
+    }
+    QString path = QString(modelPath + "/pi_para/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/q1_para/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/q2_para/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/target_pi_para/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/target_q1_para/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/target_q2_para/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/policy_optimizer/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    path = QString(modelPath + "/critic_optimizer/");
+    if(!QDir(path).exists()){
+        QDir().mkdir(path);
+    }
+    if(!QDir(testPath).exists()){
+        QDir().mkdir(testPath);
+    }
+    if(!QDir(dataPath).exists()){
+        QDir().mkdir(dataPath);
+    }
 }
 
 void LP_Plugin_Garment_Manipulation::savedata(QString fileName, std::vector<float> datas){
@@ -2431,12 +2577,54 @@ void LP_Plugin_Garment_Manipulation::loaddata(std::string fileName, std::vector<
             // Iterate over the istream, using >> to grab floats
             // and push_back to store them in the vector
             std::copy(std::istream_iterator<float>(iss),
-                  std::istream_iterator<float>(),
-                  std::back_inserter(datas));
+                      std::istream_iterator<float>(),
+                      std::back_inserter(datas));
         }
     }
     //Close The File
     in.close();
+}
+
+void LP_Plugin_Garment_Manipulation::getDataRewards(){
+    // Open the File
+    int datasize = 0;
+    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
+        datasize++;
+    }
+    datasize -= 2;
+    qDebug() << "Data size: " << datasize;
+
+    std::vector<float> rewards;
+    for(int i=0; i<datasize; i++){
+        QString path = memoryPath + "/" + QString::number(i) + "/reward.txt";
+
+        QFile file(path);
+        if(!file.open(QIODevice::ReadOnly)) {
+            qDebug() << "Cannot open file for reading:" << qPrintable(file.errorString());
+            return;
+        }
+        QTextStream in(&file);
+        while(!in.atEnd()) {
+            QString line = in.readLine();
+            rewards.push_back(line.toFloat());
+        }
+        file.close();
+    }
+
+    QFile file("/home/cpii/projects/log/cloth_test/rewards.txt");
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        qDebug() << "Cannot open file for writing:" << qPrintable(file.errorString());
+        return;
+    }
+    QTextStream out(&file);
+    for(int i=0; i<rewards.size(); i++){
+        QString str(QString::number(rewards[i]));
+        out << str << "\n";
+    }
+    file.close();
+
+    qDebug() << "Done";
 }
 
 void LP_Plugin_Garment_Manipulation::findgrasp(std::vector<double> &grasp, cv::Point &grasp_point, float &Rz, std::vector<cv::Vec4i> hierarchy){
@@ -2448,17 +2636,17 @@ void LP_Plugin_Garment_Manipulation::findgrasp(std::vector<double> &grasp, cv::P
 
         for (size_t j = 0; j < contours[i].size(); j++){
             if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
-                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
+                 && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
-                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                        && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
-                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                        && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
-                    && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
-                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10))
+                        && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
+                        && static_cast<double>(contours[i][j].y) / imageHeight < 0.10))
             { // Filter out the robot arm and markers
-                    size = size - 1;
+                size = size - 1;
             }
         }
         size += contours[i].size();
@@ -2474,14 +2662,14 @@ void LP_Plugin_Garment_Manipulation::findgrasp(std::vector<double> &grasp, cv::P
 
     while((static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.6
            && static_cast<double>(contours[randcontour][randp].y) / imageHeight > 0.6 )
-           || (sqrt(pow((static_cast<double>(contours[randcontour][randp].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[randcontour][randp].y) / imageHeight - 0.83), 2)) > 0.7745)
-           || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.90
-           && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10)
-           || (static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.10
-           && static_cast<double>(contours[randcontour][randp].y) / imageHeight > 0.90)
-           || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.480
-           && static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.580
-           && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10))
+          || (sqrt(pow((static_cast<double>(contours[randcontour][randp].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[randcontour][randp].y) / imageHeight - 0.83), 2)) > 0.7745)
+          || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.90
+              && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10)
+          || (static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.10
+              && static_cast<double>(contours[randcontour][randp].y) / imageHeight > 0.90)
+          || (static_cast<double>(contours[randcontour][randp].x) / imageWidth > 0.480
+              && static_cast<double>(contours[randcontour][randp].x) / imageWidth < 0.580
+              && static_cast<double>(contours[randcontour][randp].y) / imageHeight < 0.10))
     { // Filter out the robot arm and markers
         randcontour = rand()%int(contours.size());
         randp = rand()%int(contours[randcontour].size());
@@ -2576,10 +2764,10 @@ void LP_Plugin_Garment_Manipulation::findgrasp(std::vector<double> &grasp, cv::P
     grasp[1] = grasppt.y();
     grasp[2] = gripper_length + grasppt.z() - 0.005;
     if(grasp[2] < mTableHeight){
-//        qDebug() << QString("\033[1;31m[Warning] Crashing table : (%1, %2, %3).  "
-//                            "\033[1;33mChange h to : %4\033[0m")
-//                      .arg(grasp[0],0,'f',4).arg(grasp[1],0,'f',4).arg(grasp[2],0,'f',4)
-//                      .arg(mTableHeight).toUtf8().data();
+        //        qDebug() << QString("\033[1;31m[Warning] Crashing table : (%1, %2, %3).  "
+        //                            "\033[1;33mChange h to : %4\033[0m")
+        //                      .arg(grasp[0],0,'f',4).arg(grasp[1],0,'f',4).arg(grasp[2],0,'f',4)
+        //                      .arg(mTableHeight).toUtf8().data();
         grasp[2] = mTableHeight;
     }
 }
@@ -2606,12 +2794,12 @@ void LP_Plugin_Garment_Manipulation::findrelease(std::vector<double> &release, c
                         cv::MARKER_TILTED_CROSS,
                         20, 2, cv::LINE_AA);
 
-//        qDebug() << QString("\033[0;37mRGB( %1, %2, %3 ), XY(%4, %5)\033[0m")
-//                    .arg(releasePt_RGB[0])
-//                    .arg(releasePt_RGB[1])
-//                    .arg(releasePt_RGB[2])
-//                    .arg(release_point.x)
-//                    .arg(release_point.y).toUtf8().data();
+        //        qDebug() << QString("\033[0;37mRGB( %1, %2, %3 ), XY(%4, %5)\033[0m")
+        //                    .arg(releasePt_RGB[0])
+        //                    .arg(releasePt_RGB[1])
+        //                    .arg(releasePt_RGB[2])
+        //                    .arg(release_point.x)
+        //                    .arg(release_point.y).toUtf8().data();
 
         random_T[0] = 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]);
         random_T[1] = 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]);
@@ -2686,10 +2874,10 @@ void LP_Plugin_Garment_Manipulation::Find_Rod_Angle(std::string type, cv::Point&
             }
             point = red_point;
 
-//            gLock.lockForWrite();
-//            gInvWarpImage = QImage((uchar*) red_point_mask.data, red_point_mask.cols, red_point_mask.rows, red_point_mask.step, QImage::Format_Grayscale8).copy();
-//            gLock.unlock();
-//            emit glUpdateRequest();
+            //            gLock.lockForWrite();
+            //            gInvWarpImage = QImage((uchar*) red_point_mask.data, red_point_mask.cols, red_point_mask.rows, red_point_mask.step, QImage::Format_Grayscale8).copy();
+            //            gLock.unlock();
+            //            emit glUpdateRequest();
         } else if(type == "blue"){
             cv::Point blue_point;
             cv::Mat1b blue_point_mask;
@@ -2797,30 +2985,30 @@ void LP_Plugin_Garment_Manipulation::Find_Angle_Between_Rods(float& angle_betwee
         angle_between_rods = 2*PI - angle_between_rods;
     }
 
-//    qDebug() << "red: " << red_point.x << " " << red_point.y << " " << red_angle << "\n"
-//             << "blue: " << blue_point.x << " " << blue_point.y << " " << blue_angle << "\n"
-//             << "angle: " << angle_between_rods;
+    //    qDebug() << "red: " << red_point.x << " " << red_point.y << " " << red_angle << "\n"
+    //             << "blue: " << blue_point.x << " " << blue_point.y << " " << blue_angle << "\n"
+    //             << "angle: " << angle_between_rods;
 
-//    warped_image.copyTo(drawing);
+    //    warped_image.copyTo(drawing);
 
-//    cv::circle( drawing,
-//                red_point,
-//                12,
-//                cv::Scalar( 0, 255, 255 ),
-//                3,//cv::FILLED,
-//                cv::LINE_AA );
-//    cv::circle( drawing,
-//                blue_point,
-//                12,
-//                cv::Scalar( 255, 0, 0 ),
-//                3,//cv::FILLED,
-//                cv::LINE_AA );
+    //    cv::circle( drawing,
+    //                red_point,
+    //                12,
+    //                cv::Scalar( 0, 255, 255 ),
+    //                3,//cv::FILLED,
+    //                cv::LINE_AA );
+    //    cv::circle( drawing,
+    //                blue_point,
+    //                12,
+    //                cv::Scalar( 255, 0, 0 ),
+    //                3,//cv::FILLED,
+    //                cv::LINE_AA );
 
-//    gLock.lockForWrite();
-//    gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
-//    gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
-//    gLock.unlock();
-//    emit glUpdateRequest();
+    //    gLock.lockForWrite();
+    //    gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
+    //    gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
+    //    gLock.unlock();
+    //    emit glUpdateRequest();
 }
 
 
@@ -2853,7 +3041,7 @@ void LP_Plugin_Garment_Manipulation::Push_Down(cv::Point push_point, float& rod_
                                       push_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
     cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
     float depth_point[2] = {0},
-          color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+            color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
     rs2::frame depth;
     if(use_filter){
         depth = filtered_frame;
@@ -2903,7 +3091,7 @@ void LP_Plugin_Garment_Manipulation::Push_Up(cv::Point push_point, float& rod_an
                                       push_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
     cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
     float depth_point[2] = {0},
-          color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+            color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
     rs2::frame depth;
     if(use_filter){
         depth = filtered_frame;
@@ -2946,7 +3134,7 @@ void LP_Plugin_Garment_Manipulation::Push_to_Center(cv::Point push_point, float&
                                       push_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
     cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
     float depth_point[2] = {0},
-          color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+            color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
     rs2::frame depth;
     if(use_filter){
         depth = filtered_frame;
@@ -3068,46 +3256,46 @@ void LP_Plugin_Garment_Manipulation::Push_Rod(int push_point, float push_distanc
             Rz -= PI;
         }
 
-//        std::cout << "start_point:" <<start_point << std::endl
-//                  << "end_point:" <<end_point << std::endl
-//                  << "Rz:" <<Rz << std::endl;
+        //        std::cout << "start_point:" <<start_point << std::endl
+        //                  << "end_point:" <<end_point << std::endl
+        //                  << "Rz:" <<Rz << std::endl;
 
         if (file.open(QIODevice::ReadWrite)) {
-           file.setPermissions(QFileDevice::Permissions(1909));
-           QTextStream stream(&file);
-           stream << "#!/bin/bash" << "\n"
-                  << "\n"
-                  << "cd" << "\n"
-                  << "\n"
-                  << "source /opt/ros/foxy/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                  << "\n"
-                  << "cd tm_robot_gripper/" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << end_point[0] <<", " << end_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 0.3, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << end_point[0] <<", " << end_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 1, positions: [-1.025, -0.29, 1.952, -0.1, 1.57, 0.545], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  //<< "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n";
+            file.setPermissions(QFileDevice::Permissions(1909));
+            QTextStream stream(&file);
+            stream << "#!/bin/bash" << "\n"
+                   << "\n"
+                   << "cd" << "\n"
+                   << "\n"
+                   << "source /opt/ros/foxy/setup.bash" << "\n"
+                   << "\n"
+                   << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                   << "\n"
+                   << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                   << "\n"
+                   << "cd tm_robot_gripper/" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 2" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << end_point[0] <<", " << end_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 0.3, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << end_point[0] <<", " << end_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 1, positions: [-1.025, -0.29, 1.952, -0.1, 1.57, 0.545], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                      //<< "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 2" << "\n"
+                   << "\n";
         } else {
-           qDebug("file open error");
+            qDebug("file open error");
         }
         file.close();
 
@@ -3206,50 +3394,50 @@ void LP_Plugin_Garment_Manipulation::Push_Square(int push_point, float push_dist
             break;
         }
 
-//        std::cout << "start_point:" <<start_point << std::endl
-//                  << "end_point:" <<end_point << std::endl
-//                  << "Rz:" <<Rz << std::endl;
+        //        std::cout << "start_point:" <<start_point << std::endl
+        //                  << "end_point:" <<end_point << std::endl
+        //                  << "Rz:" <<Rz << std::endl;
 
         // Write the unfold plan file
         QString filename = "/home/cpii/projects/scripts/push_rod.sh";
         QFile file(filename);
 
         if (file.open(QIODevice::ReadWrite)) {
-           file.setPermissions(QFileDevice::Permissions(1909));
-           QTextStream stream(&file);
-           stream << "#!/bin/bash" << "\n"
-                  << "\n"
-                  << "cd" << "\n"
-                  << "\n"
-                  << "source /opt/ros/foxy/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                  << "\n"
-                  << "cd tm_robot_gripper/" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << end_point[0] <<", " << end_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 0.3, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << end_point[0] <<", " << end_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 1, positions: [-1.025, -0.29, 1.952, -0.1, 1.57, 0.545], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  //<< "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n";
+            file.setPermissions(QFileDevice::Permissions(1909));
+            QTextStream stream(&file);
+            stream << "#!/bin/bash" << "\n"
+                   << "\n"
+                   << "cd" << "\n"
+                   << "\n"
+                   << "source /opt/ros/foxy/setup.bash" << "\n"
+                   << "\n"
+                   << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                   << "\n"
+                   << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                   << "\n"
+                   << "cd tm_robot_gripper/" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 2" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << start_point[0] <<", " << start_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << end_point[0] <<", " << end_point[1] <<", " << gripper_length+0.011 <<", -3.14, 0, "<< Rz <<"], velocity: 0.3, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << end_point[0] <<", " << end_point[1] <<", " << mTableHeight+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 1, positions: [-1.025, -0.29, 1.952, -0.1, 1.57, 0.545], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                      //<< "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 2" << "\n"
+                   << "\n";
         } else {
-           qDebug("file open error");
+            qDebug("file open error");
         }
         file.close();
 
@@ -3336,7 +3524,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
     emit glUpdateRequest();
 
 
-//    qDebug() << "Done gWarpedImage";
+    //    qDebug() << "Done gWarpedImage";
 
     gLock.lockForWrite();
     gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
@@ -3345,7 +3533,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
 
 
-//    qDebug() << "Done gInvWarpImage";
+    //    qDebug() << "Done gInvWarpImage";
 
     // Find contours
     cv::Mat src_gray;
@@ -3373,7 +3561,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         return;
     }
 
-//    qDebug() << "Done contours.size() : " << contours.size();
+    //    qDebug() << "Done contours.size() : " << contours.size();
 
 
     for( size_t i = 0; i< contours.size(); i++ ){
@@ -3381,20 +3569,20 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         cv::drawContours( drawing, contours, (int)i, color, 2, cv::LINE_8, hierarchy, 0 );
 
         for (size_t j = 0; j < contours[i].size(); j++){
-//                std::cout << "\n" << i << " " << j << "Points with coordinates: x = " << contours[i][j].x << " y = " << contours[i][j].y;
+            //                std::cout << "\n" << i << " " << j << "Points with coordinates: x = " << contours[i][j].x << " y = " << contours[i][j].y;
 
             if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
-                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
+                 && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
-                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                        && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
-                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                        && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
-                    && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
-                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10))
+                        && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
+                        && static_cast<double>(contours[i][j].y) / imageHeight < 0.10))
             { // Filter out the robot arm and markers
-                    size = size - 1;
+                size = size - 1;
             } else {
                 center.x += contours[i][j].x;
                 center.y += contours[i][j].y;
@@ -3419,14 +3607,14 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
             for (size_t j = 0; j < contours[i].size(); j++){
                 if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
                      && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
-                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
-                     && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
-                     && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
-                     && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
-                     && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)){ // Filter out the robot arm and markers
+                        || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
+                        || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
+                            && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                        || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
+                            && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                        || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
+                            && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
+                            && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)){ // Filter out the robot arm and markers
                 } else if (sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) < close_point){
                     close_point = sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2));
                     grasp_point.x = contours[i][j].x;
@@ -3465,8 +3653,8 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         if(grasp[2] < mTableHeight ){
             qDebug() << QString("\033[1;31m[Warning] Crashing table : (%1, %2, %3).  "
                                 "\033[1;33mChange height to : %4\033[0m")
-                          .arg(grasp[0],0,'f',3).arg(grasp[1],0,'f',3).arg(grasp[2],0,'f',3)
-                          .arg(mTableHeight,0,'f',3).toUtf8().data();
+                        .arg(grasp[0],0,'f',3).arg(grasp[1],0,'f',3).arg(grasp[2],0,'f',3)
+                    .arg(mTableHeight,0,'f',3).toUtf8().data();
             grasp[2] = mTableHeight;
         }
         //    qDebug() << "tx: " << Pt.x() << "ty: "<< Pt.y() << "tz: "<< Pt.z();
@@ -3491,7 +3679,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         int random_number = rand()%200;
 
         const double invImageW = 1.0 / imageWidth,
-                     invImageH = 1.0 / imageHeight;
+                invImageH = 1.0 / imageHeight;
         constexpr int iBound[2] = { 1000, 9000 };
         double random_T[2] = { 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]),    //[0.1 < x < 0.9]
                                0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1])};
@@ -3501,25 +3689,25 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
         auto releasePt_RGB = warped_image.at<cv::Vec3b>(release_point.y, release_point.x);
 
-//        int c;
+        //        int c;
 
         for( size_t i = 0; i< contours.size(); i++ ){
             for (size_t j = 0; j < contours[i].size(); j++){
                 if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
                      && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
-                     || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
-                     && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
-                     && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
-                     || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
-                     && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
-                     && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)){
+                        || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
+                        || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
+                            && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                        || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
+                            && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                        || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
+                            && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
+                            && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)){
                     // Filter out the robot arm and markers
                 } else if (abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number) < close_point){
-                     close_point = abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number);
-                     grasp_point.x = contours[i][j].x;
-                     grasp_point.y = contours[i][j].y;
+                    close_point = abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number);
+                    grasp_point.x = contours[i][j].x;
+                    grasp_point.y = contours[i][j].y;
                 }
             }
         }
@@ -3530,7 +3718,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
               || releasePt_RGB[2] < uThres                                                      //Only white region (empty Table)
               || 20.0 > cv::norm(release_point - grasp_point))                                  //Distance between 2 points less than 20 pixels (searching region 20x20)
         { // Limit the release point
-//            c++;
+            //            c++;
             cv::drawMarker( drawing,
                             release_point,
                             cv::Scalar(0, 205, 205 ),
@@ -3539,10 +3727,10 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
             qDebug() << QString("\033[0;37mRGB( %1, %2, %3 ), XY(%4, %5)\033[0m")
                         .arg(releasePt_RGB[0])
-                        .arg(releasePt_RGB[1])
-                        .arg(releasePt_RGB[2])
-                        .arg(release_point.x)
-                        .arg(release_point.y).toUtf8().data();
+                    .arg(releasePt_RGB[1])
+                    .arg(releasePt_RGB[2])
+                    .arg(release_point.x)
+                    .arg(release_point.y).toUtf8().data();
 
             random_T[0] = 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]);
             random_T[1] = 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]);
@@ -3553,14 +3741,14 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
             releasePt_RGB = warped_image.at<cv::Vec3b>(release_point.y, release_point.x);
 
 
-//            qDebug()<<"x: "<< random_T[0]*imageWidth << "y: "<< random_T[1] * imageHeight;
+            //            qDebug()<<"x: "<< random_T[0]*imageWidth << "y: "<< random_T[1] * imageHeight;
 
             //To image scale
 
-    //        qDebug() << c;
-    //        qDebug() << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[0]
-    //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[1]
-    //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[2];
+            //        qDebug() << c;
+            //        qDebug() << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[0]
+            //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[1]
+            //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[2];
         }
 
         // Find the location of grasp and release point
@@ -3591,18 +3779,18 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         if(grasp[2] < mTableHeight){
             qDebug() << QString("\033[1;31m[Warning] Crashing table : (%1, %2, %3).  "
                                 "\033[1;33mChange h to : %4\033[0m")
-                          .arg(grasp[0],0,'f',4).arg(grasp[1],0,'f',4).arg(grasp[2],0,'f',4)
-                          .arg(mTableHeight).toUtf8().data();
+                        .arg(grasp[0],0,'f',4).arg(grasp[1],0,'f',4).arg(grasp[2],0,'f',4)
+                    .arg(mTableHeight).toUtf8().data();
             grasp[2] = mTableHeight;
         }
         //    qDebug() << "tx: " << Pt.x() << "ty: "<< Pt.y() << "tz: "<< Pt.z();
         //    qDebug() << "rx: "<< grasp[0] << "ry: "<< grasp[1] << "rz: "<< grasp[2];
 
         cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                          release_point.y*invImageH*warped_image_size.height);
+                                           release_point.y*invImageH*warped_image_size.height);
         cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
         float depth_pointr[2] = {0},
-              color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
         rs2_project_color_pixel_to_depth_pixel(depth_pointr, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointr);
         int P = int(depth_pointr[0])*depthh + depthh-int(depth_pointr[1]);
         cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
@@ -3616,10 +3804,10 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
         height = 0.01 * QRandomGenerator::global()->bounded(5,20);
         auto distance1 = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05)),
-             distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
+                distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
         constexpr double robotDLimit = 0.85;    //Maximum distance the robot can reach
         while ( distance1 > robotDLimit
-              || distance2 > robotDLimit){
+                || distance2 > robotDLimit){
             qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
                         .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
 
@@ -3629,7 +3817,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
             emit glUpdateRequest();
 
             if(   sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit
-               || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                  || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
 
                 if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
                     qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
@@ -3646,19 +3834,19 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
                     for (size_t j = 0; j < contours[i].size(); j++){
                         if ((static_cast<double>(contours[i][j].x) / imageWidth > 0.6
                              && static_cast<double>(contours[i][j].y) / imageHeight > 0.6 )
-                             || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
-                             || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
-                             && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
-                             || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
-                             && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
-                             || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
-                             && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
-                             && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)){
+                                || (sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth - 0.83), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight - 0.83), 2)) > 0.7745)
+                                || (static_cast<double>(contours[i][j].x) / imageWidth > 0.90
+                                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)
+                                || (static_cast<double>(contours[i][j].x) / imageWidth < 0.10
+                                    && static_cast<double>(contours[i][j].y) / imageHeight > 0.90)
+                                || (static_cast<double>(contours[i][j].x) / imageWidth > 0.480
+                                    && static_cast<double>(contours[i][j].x) / imageWidth < 0.580
+                                    && static_cast<double>(contours[i][j].y) / imageHeight < 0.10)){
                             // Filter out the robot arm and markers
                         } else if (abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number) < close_point){
-                             close_point = abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number);
-                             grasp_point.x = contours[i][j].x;
-                             grasp_point.y = contours[i][j].y;
+                            close_point = abs(sqrt(pow((static_cast<double>(contours[i][j].x) - center.x), 2) + pow((static_cast<double>(contours[i][j].y) - center.y), 2)) - random_number);
+                            grasp_point.x = contours[i][j].x;
+                            grasp_point.y = contours[i][j].y;
                         }
                     }
                 }
@@ -3685,7 +3873,7 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
                       || releasePt_RGB[2] < uThres                                                      //Only white region (empty Table)
                       || 20.0 > cv::norm(release_point - grasp_point))                                  //Distance between 2 points less than 20 pixels (searching region 20x20)
                 { // Limit the release point
-        //            c++;
+                    //            c++;
                     cv::drawMarker(drawing,
                                    release_point,
                                    cv::Scalar(0, 255, 255 ),
@@ -3695,10 +3883,10 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
                     qDebug() << QString("\033[0;37mRGB( %1, %2, %3 ), XY(%4, %5)\033[0m")
                                 .arg(releasePt_RGB[0])
-                                .arg(releasePt_RGB[1])
-                                .arg(releasePt_RGB[2])
-                                .arg(release_point.x)
-                                .arg(release_point.y).toUtf8().data();
+                            .arg(releasePt_RGB[1])
+                            .arg(releasePt_RGB[2])
+                            .arg(release_point.x)
+                            .arg(release_point.y).toUtf8().data();
 
                     random_T[0] = 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]);
                     random_T[1] = 0.0001 * QRandomGenerator::global()->bounded(iBound[0], iBound[1]);
@@ -3708,14 +3896,14 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
                     releasePt_RGB = warped_image.at<cv::Vec3b>(release_point.y, release_point.x);
 
-            //        qDebug()<<"x: "<< random_T[0]*imageWidth << "y: "<< random_T[1] * imageHeight;
+                    //        qDebug()<<"x: "<< random_T[0]*imageWidth << "y: "<< random_T[1] * imageHeight;
 
                     //To image scale
 
-            //        qDebug() << c;
-            //        qDebug() << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[0]
-            //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[1]
-            //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[2];
+                    //        qDebug() << c;
+                    //        qDebug() << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[0]
+                    //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[1]
+                    //                 << warped_image.at<cv::Vec3b>(release_point.x, release_point.y)[2];
                 }
 
                 // Find the location of grasp and release point
@@ -3739,18 +3927,18 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
                 if(grasp[2] < mTableHeight){
                     qDebug() << QString("\033[1;31m[Warning] Crashing table : (%1, %2, %3).  "
                                         "\033[1;33mChange h to : %4\033[0m")
-                                  .arg(grasp[0],0,'f',4).arg(grasp[1],0,'f',4).arg(grasp[2],0,'f',4)
-                                  .arg(mTableHeight).toUtf8().data();
+                                .arg(grasp[0],0,'f',4).arg(grasp[1],0,'f',4).arg(grasp[2],0,'f',4)
+                            .arg(mTableHeight).toUtf8().data();
                     grasp[2] = mTableHeight;
                 }
                 //    qDebug() << "tx: " << Pt.x() << "ty: "<< Pt.y() << "tz: "<< Pt.z();
                 //    qDebug() << "rx: "<< grasp[0] << "ry: "<< grasp[1] << "rz: "<< grasp[2];
 
                 cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                  release_point.y*invImageH*warped_image_size.height);
+                                                   release_point.y*invImageH*warped_image_size.height);
                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                 float depth_pointr[2] = {0},
-                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                 rs2::frame depth;
                 if(use_filter){
                     depth = filtered_frame;
@@ -3784,33 +3972,33 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
         cv::arrowedLine(drawing, grasp_point, release_point, cv::Scalar( 0, 255, 0 ), 3, cv::LINE_AA, 0, 0.25);
 
-//        float h = 0;
-//        mTestP.resize(1);
-//        for(int i=0; i<warped_image.rows; i++){
-//           for(int j=0; j<warped_image.cols; j++){
-//               auto PT_RGB = warped_image.at<cv::Vec3b>(i, j);
-//               if((i >= (0.6*warped_image.rows) && j >= (0.6*warped_image.cols))
-//                       || (PT_RGB[0] >= uThres && PT_RGB[1] >= uThres && PT_RGB[2] >= uThres)){
-//                   // do nothing
-//               } else {
-//                   cv::Point2f warpedp = cv::Point2f(j/static_cast<float>(imageWidth)*warped_image_size.width, i/static_cast<float>(imageHeight)*warped_image_size.height);
-//                   cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
-//                   float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
-//                   rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
-//                   int P = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
-//                   cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
-//                   cv::Mat ptMat = (cv::Mat_<float>(4,1) << Pc.x, Pc.y, Pc.z, 1);
-//                   cv::Mat_<float> dstMat(Transformationmatrix_T2C.inv() * ptMat);
-//                   float scale = dstMat(0,3);
-//                   QVector4D Pt(dstMat(0,0)/scale, dstMat(0,1)/scale, dstMat(0,2)/scale, 1.0f);
-//                   if(h < Pt.z()){
-//                       h = Pt.z();
-//                       mTestP[0] = mPointCloud[P];
-//                   }
-//               }
-//           }
-//        }
-//        qDebug() <<h;
+        //        float h = 0;
+        //        mTestP.resize(1);
+        //        for(int i=0; i<warped_image.rows; i++){
+        //           for(int j=0; j<warped_image.cols; j++){
+        //               auto PT_RGB = warped_image.at<cv::Vec3b>(i, j);
+        //               if((i >= (0.6*warped_image.rows) && j >= (0.6*warped_image.cols))
+        //                       || (PT_RGB[0] >= uThres && PT_RGB[1] >= uThres && PT_RGB[2] >= uThres)){
+        //                   // do nothing
+        //               } else {
+        //                   cv::Point2f warpedp = cv::Point2f(j/static_cast<float>(imageWidth)*warped_image_size.width, i/static_cast<float>(imageHeight)*warped_image_size.height);
+        //                   cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+        //                   float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+        //                   rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+        //                   int P = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
+        //                   cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
+        //                   cv::Mat ptMat = (cv::Mat_<float>(4,1) << Pc.x, Pc.y, Pc.z, 1);
+        //                   cv::Mat_<float> dstMat(Transformationmatrix_T2C.inv() * ptMat);
+        //                   float scale = dstMat(0,3);
+        //                   QVector4D Pt(dstMat(0,0)/scale, dstMat(0,1)/scale, dstMat(0,2)/scale, 1.0f);
+        //                   if(h < Pt.z()){
+        //                       h = Pt.z();
+        //                       mTestP[0] = mPointCloud[P];
+        //                   }
+        //               }
+        //           }
+        //        }
+        //        qDebug() <<h;
     }
 
     cv::circle( drawing,
@@ -3841,8 +4029,8 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
     //findLines(warped_image);
 
-//    float angle_between_rods, red_angle, blue_angle;
-//    Find_Angle_Between_Rods(angle_between_rods, red_angle, blue_angle);
+    //    float angle_between_rods, red_angle, blue_angle;
+    //    Find_Angle_Between_Rods(angle_between_rods, red_angle, blue_angle);
 
 
     if(!gPlan){
@@ -3851,48 +4039,48 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
         QFile file(filename);
 
         if (file.open(QIODevice::ReadWrite)) {
-           file.setPermissions(QFileDevice::Permissions(1909));
-           QTextStream stream(&file);
-           stream << "#!/bin/bash" << "\n"
-                  << "\n"
-                  << "cd" << "\n"
-                  << "\n"
-                  << "source /opt/ros/foxy/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                  << "\n"
-                  << "cd tm_robot_gripper/" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n";
+            file.setPermissions(QFileDevice::Permissions(1909));
+            QTextStream stream(&file);
+            stream << "#!/bin/bash" << "\n"
+                   << "\n"
+                   << "cd" << "\n"
+                   << "\n"
+                   << "source /opt/ros/foxy/setup.bash" << "\n"
+                   << "\n"
+                   << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                   << "\n"
+                   << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                   << "\n"
+                   << "cd tm_robot_gripper/" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                      //                  << "\n"
+                      //                  << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 2" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                      //                  << "\n"
+                      //                  << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                      //                  << "\n"
+                      //                  << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n"
+                   << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                      //                  << "\n"
+                      //                  << "sleep 1" << "\n"
+                   << "\n"
+                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                   << "\n";
         } else {
-           qDebug("file open error");
+            qDebug("file open error");
         }
         file.close();
     } else {
@@ -3908,8 +4096,8 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
             std::vector<std::string> points;
             for (auto i=0; i<mPointCloud.size(); i++){
                 points.push_back(QString("%1 %2 %3").arg(mPointCloud[i].x())
-                                                    .arg(mPointCloud[i].y())
-                                                    .arg(mPointCloud[i].z()).toStdString());
+                                 .arg(mPointCloud[i].y())
+                                 .arg(mPointCloud[i].z()).toStdString());
             }
 
             QString filename_points = QString(filename_dir + "/before_points.txt");
@@ -3933,150 +4121,150 @@ void LP_Plugin_Garment_Manipulation::Robot_Plan(int, void* )
 
             const auto &&mat_inv = WarpMatrix.inv();
             const auto &&WW = 1.f/static_cast<float>(imageWidth)*warped_image_size.width,
-                       &&HH = 1.f/static_cast<float>(imageHeight)*warped_image_size.height;
+                    &&HH = 1.f/static_cast<float>(imageHeight)*warped_image_size.height;
             const auto *start_ = tablepointIDs.data();
 
             auto _future = QtConcurrent::map(tablepointIDs, [&](std::string &v){
-                const auto id = &v - start_;
-                int &&i = id / warped_image.cols;
-                int &&j = id % warped_image.cols;
-                cv::Point2f warpedp = {i * WW, j * HH};
-                cv::Point3f &&homogeneous = mat_inv * warpedp;
+                    const auto id = &v - start_;
+                    int &&i = id / warped_image.cols;
+                    int &&j = id % warped_image.cols;
+                    cv::Point2f warpedp = {i * WW, j * HH};
+                    cv::Point3f &&homogeneous = mat_inv * warpedp;
 
-                float tmp_depth_point[2] = {0}, tmp_color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
-                rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
-                int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
-    //            mTestP[i] = mPointCloud[tmpTableP];
-                tablepointIDs.at(id) = QString("%1").arg(tmpTableP).toStdString();
-            });
-            _future.waitForFinished();
-
-            // Save table points
-            QString filename_tablepointIDs = QString(filename_dir + "/before_tablepointIDs.txt");
-            QByteArray filename_tablepointIDsc = filename_tablepointIDs.toLocal8Bit();
-            const char *filename_tablepointIDscc = filename_tablepointIDsc.data();
-            std::ofstream output_file2(filename_tablepointIDscc);
-            std::ostream_iterator<std::string> output_iterator2(output_file2, "\n");
-            std::copy(tablepointIDs.begin(), tablepointIDs.end(), output_iterator2);
+                    float tmp_depth_point[2] = {0}, tmp_color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+            rs2_project_color_pixel_to_depth_pixel(tmp_depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, tmp_color_point);
+            int tmpTableP = int(tmp_depth_point[0])*depthh + (depthh-int(tmp_depth_point[1]));
+            //            mTestP[i] = mPointCloud[tmpTableP];
+            tablepointIDs.at(id) = QString("%1").arg(tmpTableP).toStdString();
         });
+        _future.waitForFinished();
 
-        auto future_images = QtConcurrent::run([&](){
-            // Save Src
-            QString filename_Src = QString(filename_dir + "/before_Src.jpg");
-            QByteArray filename_Srcc = filename_Src.toLocal8Bit();
-            const char *filename_Srccc = filename_Srcc.data();
-            cv::imwrite(filename_Srccc, Src);
+        // Save table points
+        QString filename_tablepointIDs = QString(filename_dir + "/before_tablepointIDs.txt");
+        QByteArray filename_tablepointIDsc = filename_tablepointIDs.toLocal8Bit();
+        const char *filename_tablepointIDscc = filename_tablepointIDsc.data();
+        std::ofstream output_file2(filename_tablepointIDscc);
+        std::ostream_iterator<std::string> output_iterator2(output_file2, "\n");
+        std::copy(tablepointIDs.begin(), tablepointIDs.end(), output_iterator2);
+    });
 
-            // Save warped image
-            QString filename_warped = QString(filename_dir + "/before_warped_image.jpg");
-            QByteArray filename_warpedc = filename_warped.toLocal8Bit();
-            const char *filename_warpedcc = filename_warpedc.data();
-            cv::imwrite(filename_warpedcc, warped_image);
-        });
+    auto future_images = QtConcurrent::run([&](){
+        // Save Src
+        QString filename_Src = QString(filename_dir + "/before_Src.jpg");
+        QByteArray filename_Srcc = filename_Src.toLocal8Bit();
+        const char *filename_Srccc = filename_Srcc.data();
+        cv::imwrite(filename_Srccc, Src);
 
-        future_images.waitForFinished();
-        future_tablePt.waitForFinished();
-        future_camPt.waitForFinished();
+        // Save warped image
+        QString filename_warped = QString(filename_dir + "/before_warped_image.jpg");
+        QByteArray filename_warpedc = filename_warped.toLocal8Bit();
+        const char *filename_warpedcc = filename_warpedc.data();
+        cv::imwrite(filename_warpedcc, warped_image);
+    });
 
-
-        cv::Point2f warpedp = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width, release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
-        cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
-        float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
-        rs2::frame depth;
-        if(use_filter){
-            depth = filtered_frame;
-        } else {
-            depth = frames.get_depth_frame();
-        }
-        rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
-        int PP = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
-        mReleaseP.resize(1);
-        mReleaseP[0] = mPointCloud[PP];
-
-        saved_warped_image = warped_image;
-
-        // Save grasp, release points and height
-        QString filename_grp = QString(filename_dir + "/grasp_release_points_and_height.txt");
-        QFile filep(filename_grp);
-        if(filep.open(QIODevice::ReadWrite)) {
-            QTextStream streamp(&filep);
-            streamp << grasp_point.x << " " << grasp_point.y << " " << grasp[2] << " " << offset[0] << " " << offset[1] << "\n"
-                    << release_point.x << " " << release_point.y << " " << grasp[2]+height;
-        }
-        filep.close();
-
-        qDebug() << QString("Grasp -> Release: (%1, %2 %3) -> (%4, %5, %6)")
-                    .arg(grasp[0],0,'f',3).arg(grasp[1],0,'f',3).arg(grasp[2],0,'f',3)
-                    .arg(release[0],0,'f',3).arg(release[1],0,'f',3).arg(grasp[2]+height,0,'f',3)
-                    .toUtf8().data();
+    future_images.waitForFinished();
+    future_tablePt.waitForFinished();
+    future_camPt.waitForFinished();
 
 
-        // Write the unfold plan file
-        QString filename = "/home/cpii/projects/scripts/unfold.sh";
-        QFile file(filename);
-
-        if (file.open(QIODevice::ReadWrite)) {
-           file.setPermissions(QFileDevice::Permissions(1909));
-           QTextStream stream(&file);
-           stream << "#!/bin/bash" << "\n"
-                  << "\n"
-                  << "cd" << "\n"
-                  << "\n"
-                  << "source /opt/ros/foxy/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                  << "\n"
-                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                  << "\n"
-                  << "cd tm_robot_gripper/" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+height <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << grasp[2]+height <<", -3.14, 0, 0], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 2" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-//                << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << grasp[2]+height+0.05 <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-                  << "\n"
-                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                  << "\n"
-                  << "sleep 3" << "\n"
-                  << "\n";
-        } else {
-           qDebug("file open error");
-        }
-        file.close();
+    cv::Point2f warpedp = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width, release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+    cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+    float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+    rs2::frame depth;
+    if(use_filter){
+        depth = filtered_frame;
+    } else {
+        depth = frames.get_depth_frame();
     }
+    rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+    int PP = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
+    mReleaseP.resize(1);
+    mReleaseP[0] = mPointCloud[PP];
+
+    saved_warped_image = warped_image;
+
+    // Save grasp, release points and height
+    QString filename_grp = QString(filename_dir + "/grasp_release_points_and_height.txt");
+    QFile filep(filename_grp);
+    if(filep.open(QIODevice::ReadWrite)) {
+        QTextStream streamp(&filep);
+        streamp << grasp_point.x << " " << grasp_point.y << " " << grasp[2] << " " << offset[0] << " " << offset[1] << "\n"
+                << release_point.x << " " << release_point.y << " " << grasp[2]+height;
+    }
+    filep.close();
+
+    qDebug() << QString("Grasp -> Release: (%1, %2 %3) -> (%4, %5, %6)")
+                .arg(grasp[0],0,'f',3).arg(grasp[1],0,'f',3).arg(grasp[2],0,'f',3)
+            .arg(release[0],0,'f',3).arg(release[1],0,'f',3).arg(grasp[2]+height,0,'f',3)
+            .toUtf8().data();
+
+
+    // Write the unfold plan file
+    QString filename = "/home/cpii/projects/scripts/unfold.sh";
+    QFile file(filename);
+
+    if (file.open(QIODevice::ReadWrite)) {
+        file.setPermissions(QFileDevice::Permissions(1909));
+        QTextStream stream(&file);
+        stream << "#!/bin/bash" << "\n"
+               << "\n"
+               << "cd" << "\n"
+               << "\n"
+               << "source /opt/ros/foxy/setup.bash" << "\n"
+               << "\n"
+               << "source ~/ws_moveit2/install/setup.bash" << "\n"
+               << "\n"
+               << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+               << "\n"
+               << "cd tm_robot_gripper/" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 2" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+height <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << grasp[2]+height <<", -3.14, 0, 0], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 2" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                  //                << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << grasp[2]+height+0.05 <<", -3.14, 0, 0], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 3" << "\n"
+               << "\n";
+    } else {
+        qDebug("file open error");
+    }
+    file.close();
+}
 }
 
 void LP_Plugin_Garment_Manipulation::Generate_Data(){
-//    if ( !mDetector ) {
-//        mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
-//    }
+    //    if ( !mDetector ) {
+    //        mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
+    //    }
 
     auto future_get_place_point = QtConcurrent::run([this](){
         rs2::frame depth;
@@ -4119,7 +4307,6 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             src_tensor = src_tensor.unsqueeze(0).to(torch::kF32)/255;
 
             // Find contours
-
             cv::Mat src_gray;
             cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
             cv::blur( src_gray, src_gray, cv::Size(3,3) );
@@ -4180,40 +4367,40 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             src_height_tensor = src_height_tensor.to(torch::kF32);
 
             // Check height mat
-//            torch::Tensor out_tensor = src_height_tensor*255;
-//            cv::Mat cv_mat1(512, 512, CV_32FC1, out_tensor.data_ptr());
-//            auto min = out_tensor.min().item().toFloat();
-//            auto max = out_tensor.max().item().toFloat();
-//            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max-min));
-//            cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
+            //            torch::Tensor out_tensor = src_height_tensor*255;
+            //            cv::Mat cv_mat1(512, 512, CV_32FC1, out_tensor.data_ptr());
+            //            auto min = out_tensor.min().item().toFloat();
+            //            auto max = out_tensor.max().item().toFloat();
+            //            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max-min));
+            //            cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
 
 
-//            float angle = 0;
+            //            float angle = 0;
 
-//            cv::Mat rotatedImg;
-//            QImage rotatedImgqt;
-//            for(int a = 0; a < 36; a++){
-//                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+            //            cv::Mat rotatedImg;
+            //            QImage rotatedImgqt;
+            //            for(int a = 0; a < 36; a++){
+            //                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
 
-//                QMatrix r;
+            //                QMatrix r;
 
-//                r.rotate(angle*10.0);
+            //                r.rotate(angle*10.0);
 
-//                rotatedImgqt = rotatedImgqt.transformed(r);
+            //                rotatedImgqt = rotatedImgqt.transformed(r);
 
-//                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+            //                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
 
-//                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+            //                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
 
-//                if(test_result.size()>0){
-//                    for(auto i=0; i<test_result.size(); i++){
-//                        if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
-//                            conf_before = test_result[i].prob;
-//                        }
-//                    }
-//                }
-//                angle+=1;
-//            }
+            //                if(test_result.size()>0){
+            //                    for(auto i=0; i<test_result.size(); i++){
+            //                        if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
+            //                            conf_before = test_result[i].prob;
+            //                        }
+            //                    }
+            //                }
+            //                angle+=1;
+            //            }
             float Rz = 0;
             findgrasp(grasp, grasp_point, Rz, hierarchy);
             auto graspdis = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.1)*(grasp[2]+0.1));
@@ -4282,10 +4469,10 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
                 release_point.x = place_point[0]*static_cast<float>(imageWidth); release_point.y = place_point[1]*static_cast<float>(imageHeight);
 
                 cv::Point2f warpedpr = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width,
-                                                  release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+                                                   release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                 float depth_pointr[2] = {0},
-                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                 rs2::frame depth;
                 if(use_filter){
                     depth = filtered_frame;
@@ -4309,10 +4496,10 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
                 qDebug() << "distance1: " << distance1 << "distance2: " << distance2;
                 qDebug() << "place_point: " << place_point[0] << " " << place_point[1] << " " << place_point[2];
                 if(distance1 >= robotDLimit
-                   || place_point[2] < 0.05 || place_point[2] > 0.25
-                   || (place_point[0] > 0.6 && place_point[1] > 0.6)
-                   || place_point[0] < 0.1 || place_point[0] > 0.9
-                   || place_point[1] < 0.1 || place_point[1] > 0.9){
+                        || place_point[2] < 0.05 || place_point[2] > 0.25
+                        || (place_point[0] > 0.6 && place_point[1] > 0.6)
+                        || place_point[0] < 0.1 || place_point[0] > 0.9
+                        || place_point[1] < 0.1 || place_point[1] > 0.9){
                     qDebug() << "Exceeded limit, redo step";
                     qDebug() << "\033[1;31m";
                     if(distance1 >= robotDLimit){
@@ -4355,9 +4542,9 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
                             place_point[2] = float(rand()%lim) * 0.01 + 0.05;
                             release[2] = place_point[2]+gripper_length;
                             distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(release[2]+0.05)*(release[2]+0.05));
-//                            qDebug() << "lim: " << lim;
-//                            qDebug() << "place_point2: " << place_point[2];
-//                            qDebug() << "distance2: " << distance2;
+                            //                            qDebug() << "lim: " << lim;
+                            //                            qDebug() << "place_point2: " << place_point[2];
+                            //                            qDebug() << "distance2: " << distance2;
                         }
                     }
                 }
@@ -4366,13 +4553,13 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
 
                 // Find the location of grasp and release point
                 const double invImageW = 1.0 / imageWidth,
-                             invImageH = 1.0 / imageHeight;
+                        invImageH = 1.0 / imageHeight;
 
                 cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                  release_point.y*invImageH*warped_image_size.height);
+                                                   release_point.y*invImageH*warped_image_size.height);
                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                 float depth_pointr[2] = {0},
-                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                 rs2_project_color_pixel_to_depth_pixel(depth_pointr, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointr);
                 int P = int(depth_pointr[0])*depthh + depthh-int(depth_pointr[1]);
                 cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
@@ -4386,11 +4573,11 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
 
                 height = 0.01 * QRandomGenerator::global()->bounded(5,20);
                 auto distance1 = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05)),
-                     distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
+                        distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
                 while ( distance1 > robotDLimit
-                      || distance2 > robotDLimit){
-//                            qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
-//                                        .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
+                        || distance2 > robotDLimit){
+                    //                            qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
+                    //                                        .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
 
                     gLock.lockForWrite();
                     gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
@@ -4398,16 +4585,16 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
                     emit glUpdateRequest();
 
                     if(   sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit
-                       || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                          || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
 
                         findgrasp(grasp, grasp_point, Rz, hierarchy);
                         findrelease(release, release_point, grasp_point);
 
                         cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                          release_point.y*invImageH*warped_image_size.height);
+                                                           release_point.y*invImageH*warped_image_size.height);
                         cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                         float depth_pointr[2] = {0},
-                              color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                         rs2::frame depth;
                         if(use_filter){
                             depth = filtered_frame;
@@ -4481,58 +4668,58 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             QFile file(filename);
 
             if (file.open(QIODevice::ReadWrite)) {
-               file.setPermissions(QFileDevice::Permissions(1909));
-               QTextStream stream(&file);
-               stream << "#!/bin/bash" << "\n"
-                      << "\n"
-                      << "cd" << "\n"
-                      << "\n"
-                      << "source /opt/ros/foxy/setup.bash" << "\n"
-                      << "\n"
-                      << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                      << "\n"
-                      << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                      << "\n"
-                      << "cd tm_robot_gripper/" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 2" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-    //                << "sleep 1" << "\n"
-    //                << "\n"
-                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 2" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-    //                << "\n"
-    //                << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 2" << "\n"
-                      << "\n";
+                file.setPermissions(QFileDevice::Permissions(1909));
+                QTextStream stream(&file);
+                stream << "#!/bin/bash" << "\n"
+                       << "\n"
+                       << "cd" << "\n"
+                       << "\n"
+                       << "source /opt/ros/foxy/setup.bash" << "\n"
+                       << "\n"
+                       << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                       << "\n"
+                       << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                       << "\n"
+                       << "cd tm_robot_gripper/" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                          //                  << "\n"
+                          //                  << "sleep 1" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                       << "\n"
+                       << "sleep 2" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                       << "\n"
+                          //                << "sleep 1" << "\n"
+                          //                << "\n"
+                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                          //                  << "\n"
+                          //                  << "sleep 1" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                          //                  << "\n"
+                          //                  << "sleep 1" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                       << "\n"
+                       << "sleep 2" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                          //                << "\n"
+                          //                << "sleep 1" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                          //                  << "\n"
+                          //                  << "sleep 1" << "\n"
+                       << "\n"
+                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                       << "\n"
+                       << "sleep 2" << "\n"
+                       << "\n";
             } else {
-               qDebug("file open error");
+                qDebug("file open error");
             }
             file.close();
 
@@ -4646,32 +4833,32 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             after_height_tensor = torch::from_blob(after_tableheight.data(), { 1, warped_image.rows, warped_image.cols }, at::kFloat);
             after_height_tensor = after_height_tensor.to(torch::kF32);
 
-//            float angle2 = 0;
-//            cv::Mat rotatedImg2;
-//            QImage rotatedImgqt2;
-//            for(int a = 0; a < 36; a++){
-//                rotatedImgqt2 = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+            //            float angle2 = 0;
+            //            cv::Mat rotatedImg2;
+            //            QImage rotatedImgqt2;
+            //            for(int a = 0; a < 36; a++){
+            //                rotatedImgqt2 = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
 
-//                QMatrix r;
+            //                QMatrix r;
 
-//                r.rotate(angle2*10.0);
+            //                r.rotate(angle2*10.0);
 
-//                rotatedImgqt2 = rotatedImgqt2.transformed(r);
+            //                rotatedImgqt2 = rotatedImgqt2.transformed(r);
 
-//                rotatedImg2 = cv::Mat(rotatedImgqt2.height(), rotatedImgqt2.width(), CV_8UC3, rotatedImgqt2.bits());
+            //                rotatedImg2 = cv::Mat(rotatedImgqt2.height(), rotatedImgqt2.width(), CV_8UC3, rotatedImgqt2.bits());
 
-//                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg2);
+            //                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg2);
 
-//                if(test_result.size()>0){
-//                    for(auto i =0; i<test_result.size(); i++){
-//                        if(test_result[i].obj_id == 1 && conf_after < test_result[i].prob && test_result[i].prob > 0.5){
-//                            conf_after = test_result[i].prob;
-//                        }
-//                    }
-//                }
-//                angle2+=1;
-//            }
-//            qDebug() << "\033[1;32mClasscification confidence level after action: \033[0m" << conf_after;
+            //                if(test_result.size()>0){
+            //                    for(auto i =0; i<test_result.size(); i++){
+            //                        if(test_result[i].obj_id == 1 && conf_after < test_result[i].prob && test_result[i].prob > 0.5){
+            //                            conf_after = test_result[i].prob;
+            //                        }
+            //                    }
+            //                }
+            //                angle2+=1;
+            //            }
+            //            qDebug() << "\033[1;32mClasscification confidence level after action: \033[0m" << conf_after;
 
             // Get after state
 
@@ -4739,11 +4926,11 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             stepreward[0] = height_reward + garment_area_reward + conf_reward;
             qDebug() << "\033[1;31mReward from height: " << height_reward << " Reward from area: " << garment_area_reward << " Reward from classifier: " << conf_reward << "\033[0m";
 
-//            if (max_height_after < 0.02 && conf_after > 0.7) { // Max height when garment unfolded is about 0.015m, conf level is about 0.75
-//                done[0] = 1.0;
-//                stepreward[0] += 5000;
-//                qDebug() << "\033[1;31mGarment is unfolded\033[0m";
-//            }
+            //            if (max_height_after < 0.02 && conf_after > 0.7) { // Max height when garment unfolded is about 0.015m, conf level is about 0.75
+            //                done[0] = 1.0;
+            //                stepreward[0] += 5000;
+            //                qDebug() << "\033[1;31mGarment is unfolded\033[0m";
+            //            }
 
             if (max_height_after < 0.02 && squares.size() > 0) { // Max height when garment unfolded is about 0.015m and sqr size > 0
                 done[0] = 1.0;
@@ -4759,11 +4946,11 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             //std::cout << "done_tensor: " << done_tensor << std::endl;
 
             // Generate only data with reward > 100
-//            if(stepreward[0] > -100 && stepreward[0] < 100){
-//                qDebug() << "Reward too low, continue";
-//                continue;
-//            }
-/*
+            //            if(stepreward[0] > -100 && stepreward[0] < 100){
+            //                qDebug() << "Reward too low, continue";
+            //                continue;
+            //            }
+            /*
             auto future_savedata = QtConcurrent::run([before_image = before_image,
                                                      before_state_CPU = before_state.clone().detach(),
                                                      before_pick_point_CPU = before_pick_point_tensor.clone().detach(),
@@ -4857,115 +5044,115 @@ void LP_Plugin_Garment_Manipulation::Generate_Data(){
             });
         future_savedata.waitForFinished();
 */
-        total_steps++;
-        if(done[0] == 1){
-            // Reset garment
-            gCamimage.copyTo(Src);
-            std::vector<double> graspr(3);
-            cv::Point grasp_pointr;
-            cv::Mat inv_warp_imager;
-            cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
-            cv::resize(warped_image, inv_warp_imager, warped_image_size);
-            cv::warpPerspective(inv_warp_imager, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
-            cv::resize(warped_image, warped_image, warped_image_resize);
-            warped_image = background - warped_image;
-            warped_image = ~warped_image;
+            total_steps++;
+            if(done[0] == 1){
+                // Reset garment
+                gCamimage.copyTo(Src);
+                std::vector<double> graspr(3);
+                cv::Point grasp_pointr;
+                cv::Mat inv_warp_imager;
+                cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+                cv::resize(warped_image, inv_warp_imager, warped_image_size);
+                cv::warpPerspective(inv_warp_imager, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
+                cv::resize(warped_image, warped_image, warped_image_resize);
+                warped_image = background - warped_image;
+                warped_image = ~warped_image;
 
-            // Find contours
-            cv::Mat src_gray;
-            cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
-            cv::blur( src_gray, src_gray, cv::Size(3,3) );
+                // Find contours
+                cv::Mat src_gray;
+                cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
+                cv::blur( src_gray, src_gray, cv::Size(3,3) );
 
-            cv::Mat canny_output;
-            cv::Canny( src_gray, canny_output, thresh, thresh*1.2 );
-            std::vector<cv::Vec4i> hierarchyr;
-            cv::Size sz = src_gray.size();
-            imageWidth = sz.width;
-            imageHeight = sz.height;
+                cv::Mat canny_output;
+                cv::Canny( src_gray, canny_output, thresh, thresh*1.2 );
+                std::vector<cv::Vec4i> hierarchyr;
+                cv::Size sz = src_gray.size();
+                imageWidth = sz.width;
+                imageHeight = sz.height;
 
-            cv::findContours( canny_output, contours, hierarchyr, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
-            drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
+                cv::findContours( canny_output, contours, hierarchyr, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
+                drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
 
-            findgrasp(graspr, grasp_pointr, Rz, hierarchyr);
+                findgrasp(graspr, grasp_pointr, Rz, hierarchyr);
 
-            gLock.lockForWrite();
-            gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
-            gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
-            gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
-            gLock.unlock();
-            emit glUpdateRequest();
+                gLock.lockForWrite();
+                gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
+                gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
+                gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
+                gLock.unlock();
+                emit glUpdateRequest();
 
-            // Write the plan file
-            QString filename = "/home/cpii/projects/scripts/move.sh";
-            QFile file(filename);
+                // Write the plan file
+                QString filename = "/home/cpii/projects/scripts/move.sh";
+                QFile file(filename);
 
-            if (file.open(QIODevice::ReadWrite)) {
-               file.setPermissions(QFileDevice::Permissions(1909));
-               QTextStream stream(&file);
-               stream << "#!/bin/bash" << "\n"
-                      << "\n"
-                      << "cd" << "\n"
-                      << "\n"
-                      << "source /opt/ros/foxy/setup.bash" << "\n"
-                      << "\n"
-                      << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                      << "\n"
-                      << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                      << "\n"
-                      << "cd tm_robot_gripper/" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 2" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-    //                  << "\n"
-    //                  << "sleep 1" << "\n"
-                      << "\n"
-                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                      << "\n"
-                      << "sleep 2" << "\n"
-                      << "\n";
-            } else {
-               qDebug("file open error");
+                if (file.open(QIODevice::ReadWrite)) {
+                    file.setPermissions(QFileDevice::Permissions(1909));
+                    QTextStream stream(&file);
+                    stream << "#!/bin/bash" << "\n"
+                           << "\n"
+                           << "cd" << "\n"
+                           << "\n"
+                           << "source /opt/ros/foxy/setup.bash" << "\n"
+                           << "\n"
+                           << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                           << "\n"
+                           << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                           << "\n"
+                           << "cd tm_robot_gripper/" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                              //                  << "\n"
+                              //                  << "sleep 1" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 2" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 1" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                              //                  << "\n"
+                              //                  << "sleep 1" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 1" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                              //                  << "\n"
+                              //                  << "sleep 1" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 2" << "\n"
+                           << "\n";
+                } else {
+                    qDebug("file open error");
+                }
+                file.close();
+
+                QProcess plan;
+                QStringList planarg;
+
+                planarg << "/home/cpii/projects/scripts/move.sh";
+                plan.start("xterm", planarg);
+
+                constexpr int timeout_count = 60000; //60000 mseconds
+                if ( plan.waitForFinished(timeout_count)) {
+                    qDebug() << QString("\033[1;36m[%1] Env reset finished\033[0m")
+                                .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
+                                .toUtf8().data();
+                } else {
+                    qWarning() << QString("\033[1;31mRobot action not finished within %1s\033[0m").arg(timeout_count*0.001);
+                    qWarning() << plan.errorString();
+                    plan.kill();
+                    plan.waitForFinished();
+                }
+                Sleeper::sleep(3);
             }
-            file.close();
-
-            QProcess plan;
-            QStringList planarg;
-
-            planarg << "/home/cpii/projects/scripts/move.sh";
-            plan.start("xterm", planarg);
-
-            constexpr int timeout_count = 60000; //60000 mseconds
-            if ( plan.waitForFinished(timeout_count)) {
-                qDebug() << QString("\033[1;36m[%1] Env reset finished\033[0m")
-                            .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
-                            .toUtf8().data();
-            } else {
-                qWarning() << QString("\033[1;31mRobot action not finished within %1s\033[0m").arg(timeout_count*0.001);
-                qWarning() << plan.errorString();
-                plan.kill();
-                plan.waitForFinished();
-            }
-            Sleeper::sleep(3);
-        }
         }
     });
 }
@@ -5015,50 +5202,50 @@ void LP_Plugin_Garment_Manipulation::Env_reset(float &Rz, bool &bResetRobot, int
     Rz = 0;
 
     if (file.open(QIODevice::ReadWrite)) {
-       file.setPermissions(QFileDevice::Permissions(1909));
-       QTextStream stream(&file);
-       stream << "#!/bin/bash" << "\n"
-              << "\n"
-              << "cd" << "\n"
-              << "\n"
-              << "source /opt/ros/foxy/setup.bash" << "\n"
-              << "\n"
-              << "source ~/ws_moveit2/install/setup.bash" << "\n"
-              << "\n"
-              << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-              << "\n"
-              << "cd tm_robot_gripper/" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-              << "\n"
-              << "sleep 2" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-              << "\n"
-              << "sleep 1" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-              << "\n"
-              << "sleep 1" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-//                  << "\n"
-//                  << "sleep 1" << "\n"
-              << "\n"
-              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-              << "\n"
-              << "sleep 2" << "\n"
-              << "\n";
+        file.setPermissions(QFileDevice::Permissions(1909));
+        QTextStream stream(&file);
+        stream << "#!/bin/bash" << "\n"
+               << "\n"
+               << "cd" << "\n"
+               << "\n"
+               << "source /opt/ros/foxy/setup.bash" << "\n"
+               << "\n"
+               << "source ~/ws_moveit2/install/setup.bash" << "\n"
+               << "\n"
+               << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+               << "\n"
+               << "cd tm_robot_gripper/" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 2" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                  //                  << "\n"
+                  //                  << "sleep 1" << "\n"
+               << "\n"
+               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+               << "\n"
+               << "sleep 2" << "\n"
+               << "\n";
     } else {
-       qDebug("file open error");
+        qDebug("file open error");
     }
     file.close();
 
@@ -5126,41 +5313,40 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
     Transformationmatrix_T2R.rotate(-45.0, QVector3D(0.f, 0.f, 1.0f));
     Transformationmatrix_T2R.translate(0.46777, 0.63396, 0.f);
 
-
     bool transolddata = false;
     if(transolddata){
         //auto future = QtConcurrent::run([this](){
-            mLabel->setText("Loading old data");
+        mLabel->setText("Loading old data");
         //        if ( !mDetector ) {
         //            mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
         //        }
 
-            qDebug() << "Loading old data";
+        qDebug() << "Loading old data";
 
-            QString data = "/home/cpii/storage_d1/robot_garment";
+        QString data = "/home/cpii/storage_d1/robot_garment";
 
-            std::vector<std::string> transed;
+        std::vector<std::string> transed;
 
-            for (const auto & file : std::filesystem::directory_iterator(data.toStdString())){
-                int datacount = 0;
-//                if(file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep2_1"
-//                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep10_2"
-//                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep3_3"
-//                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep6_4"
-//                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep6_1"
-//                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep8_1"
-//                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep3_2"){
-//                    continue;
-//                }
-                for(const auto & tmpfile : std::filesystem::directory_iterator(file.path())){
-                    datacount++;
-                }
-                QString datapath = QString(QString::fromStdString(file.path()) + "/");
-                trans_old_data(datacount - 5, datapath, olddatasavepath);
-                transed.push_back(file.path());
-                std::cout << "Done folders: " << std::endl << transed << std::endl;
+        for (const auto & file : std::filesystem::directory_iterator(data.toStdString())){
+            int datacount = 0;
+            //                if(file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep2_1"
+            //                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep10_2"
+            //                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep3_3"
+            //                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep6_4"
+            //                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep6_1"
+            //                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep8_1"
+            //                   || file.path() == "/home/cpii/storage_d1/robot_garment/data_Sep3_2"){
+            //                    continue;
+            //                }
+            for(const auto & tmpfile : std::filesystem::directory_iterator(file.path())){
+                datacount++;
             }
-            qDebug() << "Trans old data done";
+            QString datapath = QString(QString::fromStdString(file.path()) + "/");
+            trans_old_data(datacount - 5, datapath, olddatasavepath);
+            transed.push_back(file.path());
+            std::cout << "Done folders: " << std::endl << transed << std::endl;
+        }
+        qDebug() << "Trans old data done";
         //});
         //future.waitForFinished();
         return;
@@ -5196,25 +5382,25 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
                   -8.1804097972212695e-03);
 
     // Data for camera 165
-//    cameraMatrix = (cv::Mat_<double>(3, 3) <<
-//                    6.3571421284896633e+02, 0.0,                    6.3524956160971124e+02,
-//                    0.0,                    6.3750269218122367e+02, 4.0193458977992344e+02,
-//                    0.0,                    0.0,                    1.0);
+    //    cameraMatrix = (cv::Mat_<double>(3, 3) <<
+    //                    6.3571421284896633e+02, 0.0,                    6.3524956160971124e+02,
+    //                    0.0,                    6.3750269218122367e+02, 4.0193458977992344e+02,
+    //                    0.0,                    0.0,                    1.0);
 
-//    distCoeffs = (cv::Mat_<double>(1, 5) <<
-//                  -4.8277907059162739e-02,
-//                  5.3985456400810893e-02,
-//                  -2.2871626654868312e-04,
-//                  -6.3558631226346730e-04,
-//                  -1.1703243048952400e-02);
+    //    distCoeffs = (cv::Mat_<double>(1, 5) <<
+    //                  -4.8277907059162739e-02,
+    //                  5.3985456400810893e-02,
+    //                  -2.2871626654868312e-04,
+    //                  -6.3558631226346730e-04,
+    //                  -1.1703243048952400e-02);
 
     dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100);
     dictionary2 = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_ARUCO_ORIGINAL);
 
     gFuture = QtConcurrent::run([this](){
 
-//        int countx = 0;
-//        int county = 360;
+        //        int countx = 0;
+        //        int county = 360;
 
         // Declare filters
         rs2::decimation_filter dec_filter;  // Decimation - reduces depth frame density
@@ -5286,19 +5472,19 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
                 depthw = depth_frame.get_width();
                 depthh = depth_frame.get_height();
             }
-//            qDebug() << "filtered:" << filtered.get_width() << "x" << filtered.get_height();
-//            qDebug() << "depth:" << depth_frame.get_width() << "x" << depth_frame.get_height();
+            //            qDebug() << "filtered:" << filtered.get_width() << "x" << filtered.get_height();
+            //            qDebug() << "depth:" << depth_frame.get_width() << "x" << depth_frame.get_height();
 
             // Push filtered & original data to their respective queues
             // Note, pushing to two different queues might cause the application to display
             //  original and filtered pointclouds from different depth frames
             //  To make sure they are synchronized you need to push them together or add some
             //  synchronization mechanisms
-//            original_data.enqueue(depth_frame);
-//            filtered_data.enqueue(filtered);
+            //            original_data.enqueue(depth_frame);
+            //            filtered_data.enqueue(filtered);
 
-//            qDebug() << "filtered size:"
-//                     << filtered.get_data_size();
+            //            qDebug() << "filtered size:"
+            //                     << filtered.get_data_size();
 
             // Our rgb frame
             rs2::frame rgb = frames.get_color_frame();
@@ -5316,11 +5502,11 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
             } else {
                 depth = depth_frame;
             }
-//            std::cout << "depth size:\n"
-//                      << depth_frame.get_data_size()
-//                      << "filter size:\n"
-//                      << filtered_frame.get_data_size()
-//                      << "\n";
+            //            std::cout << "depth size:\n"
+            //                      << depth_frame.get_data_size()
+            //                      << "filter size:\n"
+            //                      << filtered_frame.get_data_size()
+            //                      << "\n";
 
             // Device information
             depth_i = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
@@ -5330,12 +5516,12 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
             rs2::depth_sensor ds = dev.query_sensors().front().as<rs2::depth_sensor>();
             depth_scale = ds.get_depth_scale();
             //std::cout << "depth_scale: " << depth_scale;
-        //                float fx=i.fx, fy=i.fy, cx=i.ppx, cy=i.ppy, distC1 = j.coeffs[0], distC2 = j.coeffs[1], distC3 = j.coeffs[2], distC4 = j.coeffs[3], distC5 = j.coeffs[4];
-        //                qDebug()<< "fx: "<< fx << "fy: "<< fy << "cx: "<< cx << "cy: "<< cy << "coeffs: "<< distC1 << " "<< distC2 << " "<< distC3 << " "<< distC4 << " "<< distC5;
-        //                QMatrix4x4 K = {fx,   0.0f,   cx, 0.0f,
-        //                                0.0f,   fy,   cy, 0.0f,
-        //                                0.0f, 0.0f, 1.0f, 0.0f,
-        //                                0.0f, 0.0f, 0.0f, 0.0f};
+            //                float fx=i.fx, fy=i.fy, cx=i.ppx, cy=i.ppy, distC1 = j.coeffs[0], distC2 = j.coeffs[1], distC3 = j.coeffs[2], distC4 = j.coeffs[3], distC5 = j.coeffs[4];
+            //                qDebug()<< "fx: "<< fx << "fy: "<< fy << "cx: "<< cx << "cy: "<< cy << "coeffs: "<< distC1 << " "<< distC2 << " "<< distC3 << " "<< distC4 << " "<< distC5;
+            //                QMatrix4x4 K = {fx,   0.0f,   cx, 0.0f,
+            //                                0.0f,   fy,   cy, 0.0f,
+            //                                0.0f, 0.0f, 1.0f, 0.0f,
+            //                                0.0f, 0.0f, 0.0f, 0.0f};
 
             // Generate the pointcloud and texture mappings
             const rs2::vertex* vertices;
@@ -5348,8 +5534,8 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
                 vertices = points.get_vertices();
             }
 
-//            qDebug() << "points size:"
-//                     << points.size();
+            //            qDebug() << "points size:"
+            //                     << points.size();
 
             // Let's convert them to QImage
             auto q_rgb = realsenseFrameToQImage(rgb);
@@ -5357,35 +5543,35 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
             cv::Mat camimage = cv::Mat(q_rgb.height(),q_rgb.width(), CV_8UC3, q_rgb.bits());
             cv::cvtColor(camimage, camimage, cv::COLOR_BGR2RGB);
 
-//            qDebug()<< "depthw: "<< depthw <<"depthh: " << depthh<< "q_rgbh: "<<q_rgb.height()<<"q_rgbw: "<<q_rgb.width();
+            //            qDebug()<< "depthw: "<< depthw <<"depthh: " << depthh<< "q_rgbh: "<<q_rgb.height()<<"q_rgbw: "<<q_rgb.width();
 
             srcw = camimage.cols;
             srch = camimage.rows;
 
             camimage.copyTo(gCamimage);
 
-//            //////////////////////////////////////
-//            cv::Mat img = gCamimage;//cv::imread("/home/cpii/Desktop/digit/img.png", cv::IMREAD_COLOR);
+            //            //////////////////////////////////////
+            //            cv::Mat img = gCamimage;//cv::imread("/home/cpii/Desktop/digit/img.png", cv::IMREAD_COLOR);
 
-//            std::vector<cv::Rect> box;
-//            std::vector<float> conf;
+            //            std::vector<cv::Rect> box;
+            //            std::vector<float> conf;
 
-//            detector->detect(img, box, conf);
+            //            detector->detect(img, box, conf);
 
-//            if(!box.empty()){
-//                std::vector<int> indexes;
-//                cv::dnn::NMSBoxes(box, conf, 0.3f, 0.4f, indexes);
-//                textbox_draw(img, box, conf, indexes);
+            //            if(!box.empty()){
+            //                std::vector<int> indexes;
+            //                cv::dnn::NMSBoxes(box, conf, 0.3f, 0.4f, indexes);
+            //                textbox_draw(img, box, conf, indexes);
 
-//                //cv::imshow("TextBox Demo", img);
-//            } else {
-//                qDebug() << "nothing!";
-//            }
+            //                //cv::imshow("TextBox Demo", img);
+            //            } else {
+            //                qDebug() << "nothing!";
+            //            }
 
-//            //std::cout << "Done!" << std::endl << std::endl;
-//            //std::cout << "Press any key to exit." << std::endl << std::endl;
+            //            //std::cout << "Done!" << std::endl << std::endl;
+            //            //std::cout << "Press any key to exit." << std::endl << std::endl;
 
-//            //////////////////////////////////////
+            //            //////////////////////////////////////
 
             // if at least one marker detected
             if ( !gFoundBackground ) {
@@ -5438,225 +5624,225 @@ void LP_Plugin_Garment_Manipulation::RobotReset_RunCamera(){
                                 }
 
                                 markertrans = std::vector<double>{tmpP[0].x, tmpP[0].y};
-                                frame = frame + 1;
-                                markercount = markercount + 1;
-                            } else if (ids[i] == 98){
-                                detected_markers[1] = 98;
-                                std::vector< cv::Point3f> table_corners_3d, tmpO;
-                                std::vector< cv::Point2f> table_corners_2d, tmpP;
-                                table_corners_3d.push_back(cv::Point3f(-0.05, 0.04,  0.0));
-                                table_corners_3d.push_back(cv::Point3f( 0.95, 0.04,  0.0));
-                                table_corners_3d.push_back(cv::Point3f( 0.95,-0.96,  0.0));
-                                table_corners_3d.push_back(cv::Point3f(-0.05,-0.96,  0.0));
-                                tmpO.push_back(cv::Point3f(0.0, 0.0, 0.0));
-                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
-                                cv::projectPoints(tmpO, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, tmpP);
-                                for(int j=0; j<4; j++){
-                                    roi_corners[j].x = roi_corners[j].x + table_corners_2d[j].x;
-                                    roi_corners[j].y = roi_corners[j].y + table_corners_2d[j].y;
-                                }
-                                markercoordinate_98 = std::vector<double>{tmpP[0].x, tmpP[0].y};
-                                markercount = markercount + 1;
-                            } else if (ids[i] == 99){
-                                detected_markers[2] = 99;
-                                std::vector< cv::Point3f> table_corners_3d, tmpO;
-                                std::vector< cv::Point2f> table_corners_2d, tmpP;
-                                table_corners_3d.push_back(cv::Point3f(-0.95, 0.04, 0.0));
-                                table_corners_3d.push_back(cv::Point3f( 0.05, 0.04, 0.0));
-                                table_corners_3d.push_back(cv::Point3f( 0.05,-0.96, 0.0));
-                                table_corners_3d.push_back(cv::Point3f(-0.95,-0.96, 0.0));
-                                tmpO.push_back(cv::Point3f(0.0, 0.0, 0.0));
-                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
-                                cv::projectPoints(tmpO, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, tmpP);
-                                for(int j=0; j<4; j++){
-                                    roi_corners[j].x = roi_corners[j].x + table_corners_2d[j].x;
-                                    roi_corners[j].y = roi_corners[j].y + table_corners_2d[j].y;
-                                }
-                                markercoordinate_99 = std::vector<double>{tmpP[0].x, tmpP[0].y};
-                                markercount = markercount + 1;
-                            } else if (ids[i] == 0){
-                                std::vector< cv::Point3f> table_corners_3d;
-                                std::vector< cv::Point2f> table_corners_2d;
-                                table_corners_3d.push_back(cv::Point3f(-0.53, 0.035, 0.0));
-                                table_corners_3d.push_back(cv::Point3f( 0.47, 0.035, 0.0));
-                                table_corners_3d.push_back(cv::Point3f( 0.47,-0.965, 0.0));
-                                table_corners_3d.push_back(cv::Point3f(-0.53,-0.965, 0.0));
-                                cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
-                                for(int j=0; j<4; j++){
-                                    roi_corners[j].x = roi_corners[j].x + table_corners_2d[j].x;
-                                    roi_corners[j].y = roi_corners[j].y + table_corners_2d[j].y;
-                                }
-                                markercount = markercount + 1;
-                            }
-                            if(markercount >= nIteration){
-                                qDebug()<< "Alignment Done";
-                            }
-                        }
-                    }
-                }
-            }
-
-
-            // Draw PointCloud
-            mPointCloud.resize(depthw * depthh);
-            mPointCloudTex.resize(depthw * depthh);
-
-            // and texture coordinates
-            const rs2::texture_coordinate* tex_coords;
-            if(use_filter){
-                //tex_coords = filtered_points.get_texture_coordinates();
-                tex_coords = points.get_texture_coordinates();
-            } else {
-                tex_coords = points.get_texture_coordinates();
-            }
-            if ( mShowInTableCoordinateFrame && gFoundBackground && !gStopFindWorkspace ) {
-                const auto &&invM_T2C = Transformationmatrix_T2C.inv();
-                const auto start = mPointCloud.data();
-                auto future = QtConcurrent::map(mPointCloud, [&](QVector3D &v){
-                    auto &&dIndex = &v - start;
-                    float data[] = {vertices[dIndex].x, vertices[dIndex].y, vertices[dIndex].z, 1.f};
-                    cv::Mat ptMato = cv::Mat(4, 1, CV_32F, data);
-                    cv::Mat dstMato(invM_T2C * ptMato);
-                    v = QVector3D(dstMato.at<float>(0,0), dstMato.at<float>(0,1), dstMato.at<float>(0,2));
-                });
-//                std::memcpy(mPointCloud.data(), vertices, depthw * depthh * sizeof(rs2::vertex));
-                std::memcpy(mPointCloudTex.data(), tex_coords, depthw * depthh * sizeof(rs2::texture_coordinate));
-
-                future.waitForFinished();
-                //////////////////////////////////////////////////////////
-//                    for ( int i=0; i<depthw; ++i ){
-//                        for ( int j=0; j<depthh; ++j ){
-//                            const auto &&dIndex = (depthh-j)*depthw-(depthw-i);
-//                            const auto &&index_I = i*depthh + j;
-//                            //cv::Point3f Pco = cv::Point3f{mPointCloud[index_I].x(), -mPointCloud[index_I].y(), -mPointCloud[index_I].z()};
-//                            float data[] = {vertices[dIndex].x, vertices[dIndex].y, vertices[dIndex].z, 1.f};
-//                            cv::Mat ptMato = cv::Mat(4, 1, CV_32F, data);
-//                            cv::Mat dstMato(invM_T2C * ptMato);
-//                            const float &scaleo = dstMato.at<float>(0,3);
-
-//                            mPointCloud[index_I].setX(dstMato.at<float>(0,0)/scaleo);
-//                            mPointCloud[index_I].setY(dstMato.at<float>(0,1)/scaleo);
-//                            mPointCloud[index_I].setZ(dstMato.at<float>(0,2)/scaleo);
-
-//                            mPointCloudTex[index_I] = QVector2D(tex_coords[dIndex].u, tex_coords[dIndex].v);
-//                        }
-//                    }
-                //////////////////////////////////////////////////////////
-            } else {
-                for ( int i=0; i<depthw; ++i ){
-                    for ( int j=0; j<depthh; ++j ){
-                        const auto &&dIndex = (depthh-j)*depthw-(depthw-i);
-                        if (vertices[dIndex].z){
-                            const auto &&index_I = i*depthh + j;
-                            mPointCloud[index_I] = QVector3D(vertices[dIndex].x, -vertices[dIndex].y, -vertices[dIndex].z);
-                            mPointCloudTex[index_I] = QVector2D(tex_coords[dIndex].u, tex_coords[dIndex].v);
-                        }
-                    }
-                }
-            }
-
-            if(mFindmarker){
-                std::vector<int> ids2;
-                std::vector<std::vector<cv::Point2f>> corners2;
-                cv::Ptr<cv::aruco::DetectorParameters> params2 = cv::aruco::DetectorParameters::create();
-                cv::aruco::detectMarkers(camimage, dictionary2, corners2, ids2, params2);
-
-                if(!ids2.empty()){
-                    cv::aruco::drawDetectedMarkers(camimage, corners2, ids2, cv::Scalar(0, 0, 255));
-                    for(auto i=0; i<ids2.size(); i++){
-                        if(ids2[i]==mTarget_marker){
+                            frame = frame + 1;
+                            markercount = markercount + 1;
+                        } else if (ids[i] == 98){
+                            detected_markers[1] = 98;
+                            std::vector< cv::Point3f> table_corners_3d, tmpO;
+                            std::vector< cv::Point2f> table_corners_2d, tmpP;
+                            table_corners_3d.push_back(cv::Point3f(-0.05, 0.04,  0.0));
+                            table_corners_3d.push_back(cv::Point3f( 0.95, 0.04,  0.0));
+                            table_corners_3d.push_back(cv::Point3f( 0.95,-0.96,  0.0));
+                            table_corners_3d.push_back(cv::Point3f(-0.05,-0.96,  0.0));
+                            tmpO.push_back(cv::Point3f(0.0, 0.0, 0.0));
+                            cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+                            cv::projectPoints(tmpO, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, tmpP);
                             for(int j=0; j<4; j++){
-                                mMarkerPosi.x += corners2[i][j].x;
-                                mMarkerPosi.y += corners2[i][j].y;
+                                roi_corners[j].x = roi_corners[j].x + table_corners_2d[j].x;
+                                roi_corners[j].y = roi_corners[j].y + table_corners_2d[j].y;
                             }
-                            mMarkerPosi.x *= 0.25;
-                            mMarkerPosi.y *= 0.25;
-
-                            mFindmarker = false;
+                            markercoordinate_98 = std::vector<double>{tmpP[0].x, tmpP[0].y};
+                        markercount = markercount + 1;
+                    } else if (ids[i] == 99){
+                        detected_markers[2] = 99;
+                        std::vector< cv::Point3f> table_corners_3d, tmpO;
+                        std::vector< cv::Point2f> table_corners_2d, tmpP;
+                        table_corners_3d.push_back(cv::Point3f(-0.95, 0.04, 0.0));
+                        table_corners_3d.push_back(cv::Point3f( 0.05, 0.04, 0.0));
+                        table_corners_3d.push_back(cv::Point3f( 0.05,-0.96, 0.0));
+                        table_corners_3d.push_back(cv::Point3f(-0.95,-0.96, 0.0));
+                        tmpO.push_back(cv::Point3f(0.0, 0.0, 0.0));
+                        cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+                        cv::projectPoints(tmpO, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, tmpP);
+                        for(int j=0; j<4; j++){
+                            roi_corners[j].x = roi_corners[j].x + table_corners_2d[j].x;
+                            roi_corners[j].y = roi_corners[j].y + table_corners_2d[j].y;
                         }
+                        markercoordinate_99 = std::vector<double>{tmpP[0].x, tmpP[0].y};
+                    markercount = markercount + 1;
+                } else if (ids[i] == 0){
+                    std::vector< cv::Point3f> table_corners_3d;
+                    std::vector< cv::Point2f> table_corners_2d;
+                    table_corners_3d.push_back(cv::Point3f(-0.53, 0.035, 0.0));
+                    table_corners_3d.push_back(cv::Point3f( 0.47, 0.035, 0.0));
+                    table_corners_3d.push_back(cv::Point3f( 0.47,-0.965, 0.0));
+                    table_corners_3d.push_back(cv::Point3f(-0.53,-0.965, 0.0));
+                    cv::projectPoints(table_corners_3d, rvecs[i], tvecs[i], cameraMatrix, distCoeffs, table_corners_2d);
+                    for(int j=0; j<4; j++){
+                        roi_corners[j].x = roi_corners[j].x + table_corners_2d[j].x;
+                        roi_corners[j].y = roi_corners[j].y + table_corners_2d[j].y;
                     }
+                    markercount = markercount + 1;
+                }
+                if(markercount >= nIteration){
+                    qDebug()<< "Alignment Done";
                 }
             }
+        }
+    }
+}
 
-            if(mCalAveragePoint && acount<30){
-                avgHeight.resize( depthh * depthw );
 
-                auto *_start = avgHeight.data();
-                auto mat_Inv = Transformationmatrix_T2C.inv();
+// Draw PointCloud
+mPointCloud.resize(depthw * depthh);
+mPointCloudTex.resize(depthw * depthh);
 
-                auto _future = QtConcurrent::map(avgHeight, [&](double &h ){
-                    auto id = &h - _start;
-//                    auto i = id / depthh;
-//                    auto j = id % depthh;
-//                    auto dIndex = (depthh-j)*depthw-(depthw-i);
-                    cv::Point3f Pc = cv::Point3f{mPointCloud[id].x(), -mPointCloud[id].y(), -mPointCloud[id].z()};
-                    cv::Mat ptMat = (cv::Mat_<float>(4,1) << Pc.x, Pc.y, Pc.z, 1);
-                    cv::Mat_<float> dstMat(mat_Inv * ptMat);
-                    float scale = dstMat(0,3);
-                    QVector4D Pt(dstMat(0,0)/scale, dstMat(0,1)/scale, dstMat(0,2)/scale, 1.0f);
-                    avgHeight.at(id) += Pt.z();
-                });
-                _future.waitForFinished();
+// and texture coordinates
+const rs2::texture_coordinate* tex_coords;
+if(use_filter){
+    //tex_coords = filtered_points.get_texture_coordinates();
+    tex_coords = points.get_texture_coordinates();
+} else {
+tex_coords = points.get_texture_coordinates();
+}
+if ( mShowInTableCoordinateFrame && gFoundBackground && !gStopFindWorkspace ) {
+    const auto &&invM_T2C = Transformationmatrix_T2C.inv();
+    const auto start = mPointCloud.data();
+    auto future = QtConcurrent::map(mPointCloud, [&](QVector3D &v){
+            auto &&dIndex = &v - start;
+            float data[] = {vertices[dIndex].x, vertices[dIndex].y, vertices[dIndex].z, 1.f};
+            cv::Mat ptMato = cv::Mat(4, 1, CV_32F, data);
+            cv::Mat dstMato(invM_T2C * ptMato);
+            v = QVector3D(dstMato.at<float>(0,0), dstMato.at<float>(0,1), dstMato.at<float>(0,2));
+});
+    //                std::memcpy(mPointCloud.data(), vertices, depthw * depthh * sizeof(rs2::vertex));
+    std::memcpy(mPointCloudTex.data(), tex_coords, depthw * depthh * sizeof(rs2::texture_coordinate));
 
-                acount++;
+    future.waitForFinished();
+    //////////////////////////////////////////////////////////
+    //                    for ( int i=0; i<depthw; ++i ){
+    //                        for ( int j=0; j<depthh; ++j ){
+    //                            const auto &&dIndex = (depthh-j)*depthw-(depthw-i);
+    //                            const auto &&index_I = i*depthh + j;
+    //                            //cv::Point3f Pco = cv::Point3f{mPointCloud[index_I].x(), -mPointCloud[index_I].y(), -mPointCloud[index_I].z()};
+    //                            float data[] = {vertices[dIndex].x, vertices[dIndex].y, vertices[dIndex].z, 1.f};
+    //                            cv::Mat ptMato = cv::Mat(4, 1, CV_32F, data);
+    //                            cv::Mat dstMato(invM_T2C * ptMato);
+    //                            const float &scaleo = dstMato.at<float>(0,3);
 
-                if(acount>=30){
-                    for(int i=0; i< avgHeight.size(); i++){
-                        avgHeight.at(i) /= double(acount);
-                    }
-                    if(!mCalAvgMat && graspx!=0 && graspy!=0){
-                        auto pickPtHeight = avgHeight.at(depthh*graspx + depthh-graspy);
+    //                            mPointCloud[index_I].setX(dstMato.at<float>(0,0)/scaleo);
+    //                            mPointCloud[index_I].setY(dstMato.at<float>(0,1)/scaleo);
+    //                            mPointCloud[index_I].setZ(dstMato.at<float>(0,2)/scaleo);
 
-                        cv::Point3f Pco = cv::Point3f{mPointCloud[depthh*graspx + depthh-graspy].x(), -mPointCloud[depthh*graspx + depthh-graspy].y(), -mPointCloud[depthh*graspx + depthh-graspy].z()};
+    //                            mPointCloudTex[index_I] = QVector2D(tex_coords[dIndex].u, tex_coords[dIndex].v);
+    //                        }
+    //                    }
+    //////////////////////////////////////////////////////////
+} else {
+for ( int i=0; i<depthw; ++i ){
+    for ( int j=0; j<depthh; ++j ){
+        const auto &&dIndex = (depthh-j)*depthw-(depthw-i);
+        if (vertices[dIndex].z){
+            const auto &&index_I = i*depthh + j;
+            mPointCloud[index_I] = QVector3D(vertices[dIndex].x, -vertices[dIndex].y, -vertices[dIndex].z);
+            mPointCloudTex[index_I] = QVector2D(tex_coords[dIndex].u, tex_coords[dIndex].v);
+        }
+    }
+}
+}
+
+if(mFindmarker){
+    std::vector<int> ids2;
+    std::vector<std::vector<cv::Point2f>> corners2;
+    cv::Ptr<cv::aruco::DetectorParameters> params2 = cv::aruco::DetectorParameters::create();
+    cv::aruco::detectMarkers(camimage, dictionary2, corners2, ids2, params2);
+
+    if(!ids2.empty()){
+        cv::aruco::drawDetectedMarkers(camimage, corners2, ids2, cv::Scalar(0, 0, 255));
+        for(auto i=0; i<ids2.size(); i++){
+            if(ids2[i]==mTarget_marker){
+                for(int j=0; j<4; j++){
+                    mMarkerPosi.x += corners2[i][j].x;
+                    mMarkerPosi.y += corners2[i][j].y;
+                }
+                mMarkerPosi.x *= 0.25;
+                mMarkerPosi.y *= 0.25;
+
+                mFindmarker = false;
+            }
+        }
+    }
+}
+
+if(mCalAveragePoint && acount<30){
+    avgHeight.resize( depthh * depthw );
+
+    auto *_start = avgHeight.data();
+    auto mat_Inv = Transformationmatrix_T2C.inv();
+
+    auto _future = QtConcurrent::map(avgHeight, [&](double &h ){
+        auto id = &h - _start;
+        //                    auto i = id / depthh;
+        //                    auto j = id % depthh;
+        //                    auto dIndex = (depthh-j)*depthw-(depthw-i);
+        cv::Point3f Pc = cv::Point3f{mPointCloud[id].x(), -mPointCloud[id].y(), -mPointCloud[id].z()};
+        cv::Mat ptMat = (cv::Mat_<float>(4,1) << Pc.x, Pc.y, Pc.z, 1);
+        cv::Mat_<float> dstMat(mat_Inv * ptMat);
+        float scale = dstMat(0,3);
+        QVector4D Pt(dstMat(0,0)/scale, dstMat(0,1)/scale, dstMat(0,2)/scale, 1.0f);
+        avgHeight.at(id) += Pt.z();
+    });
+    _future.waitForFinished();
+
+    acount++;
+
+    if(acount>=30){
+        for(int i=0; i< avgHeight.size(); i++){
+            avgHeight.at(i) /= double(acount);
+        }
+        if(!mCalAvgMat && graspx!=0 && graspy!=0){
+            auto pickPtHeight = avgHeight.at(depthh*graspx + depthh-graspy);
+
+            cv::Point3f Pco = cv::Point3f{mPointCloud[depthh*graspx + depthh-graspy].x(), -mPointCloud[depthh*graspx + depthh-graspy].y(), -mPointCloud[depthh*graspx + depthh-graspy].z()};
         //                qDebug() << "Pco: "<< Pco.x << " "<<Pco.y <<" "<<Pco.z;
-                        cv::Mat ptMato = (cv::Mat_<float>(4,1) << Pco.x, Pco.y, Pco.z, 1);
-                        cv::Mat_<float> dstMato(mat_Inv * ptMato);
+        cv::Mat ptMato = (cv::Mat_<float>(4,1) << Pco.x, Pco.y, Pco.z, 1);
+        cv::Mat_<float> dstMato(mat_Inv * ptMato);
         //                qDebug() << "dstMato: "<< dstMato(0,0)<<" "<<dstMato(0,1)<<" "<< dstMato(0,2)<< " "<< dstMato(0,3);
-                        float scaleo = dstMato(0,3);
-                        QVector4D Pto(dstMato(0,0)/scaleo, dstMato(0,1)/scaleo, dstMato(0,2)/scaleo, 1.0f);
+        float scaleo = dstMato(0,3);
+        QVector4D Pto(dstMato(0,0)/scaleo, dstMato(0,1)/scaleo, dstMato(0,2)/scaleo, 1.0f);
         //                qDebug() << "Pto: "<< Pto.x() <<" "<<Pto.y()<<" "<<Pto.z();
-                        QVector4D Pro = Transformationmatrix_T2R.inverted() * Pto;
-                        std::vector<double> tmph = {Pro.x(), Pro.y(), pickPtHeight};
+        QVector4D Pro = Transformationmatrix_T2R.inverted() * Pto;
+        std::vector<double> tmph = {Pro.x(), Pro.y(), pickPtHeight};
         //                qDebug()<< "Pro: "<< Pro.x()<<" "<<Pro.y()<<" "<< Pro.z();
 
-                        int range = 10;
-                        for(int i=0; i<range; i++){
-                            for(int j=0; j<range; j++){
-                                auto id = depthh*(graspx-(range/2)+i) + depthh-(graspy-(range/2)+j);
-                                cv::Point3f Pc = cv::Point3f{mPointCloud[id].x(), -mPointCloud[id].y(), -mPointCloud[id].z()};
-                                cv::Mat ptMat = (cv::Mat_<float>(4,1) << Pc.x, Pc.y, Pc.z, 1);
-                                cv::Mat_<float> dstMat(mat_Inv * ptMat);
-                                float scale = dstMat(0,3);
-                                QVector4D Pt(dstMat(0,0)/scale, dstMat(0,1)/scale, dstMat(0,2)/scale, 1.0f);
-                                QVector4D Pr = Transformationmatrix_T2R.inverted() * Pt;
-                                if(avgHeight.at(id)>tmph[2]
-                                   && sqrt(Pr.x()*Pr.x() - Pro.x()*Pro.x()) <= 0.1
-                                   && sqrt(Pr.y()*Pr.y() - Pro.y()*Pro.y()) <= 0.1
-                                   && sqrt(avgHeight.at(id)*avgHeight.at(id) - tmph[2]*tmph[2]) <= 0.1){
-                                    tmph[0] = Pr.x();
-                                    tmph[1] = Pr.y();
-                                    tmph[2] = avgHeight.at(id);
-                                    offset[0] = -range+i;
-                                    offset[1] = -range+j;
-                                }
-                                    //qDebug()<< "P: "<< id << "H: "<< avgHeight.at(id);
-                            }
-                        }
-                        grasppt = {tmph[0], tmph[1], tmph[2]};
-                    }
+        int range = 10;
+        for(int i=0; i<range; i++){
+            for(int j=0; j<range; j++){
+                auto id = depthh*(graspx-(range/2)+i) + depthh-(graspy-(range/2)+j);
+                cv::Point3f Pc = cv::Point3f{mPointCloud[id].x(), -mPointCloud[id].y(), -mPointCloud[id].z()};
+                cv::Mat ptMat = (cv::Mat_<float>(4,1) << Pc.x, Pc.y, Pc.z, 1);
+                cv::Mat_<float> dstMat(mat_Inv * ptMat);
+                float scale = dstMat(0,3);
+                QVector4D Pt(dstMat(0,0)/scale, dstMat(0,1)/scale, dstMat(0,2)/scale, 1.0f);
+                QVector4D Pr = Transformationmatrix_T2R.inverted() * Pt;
+                if(avgHeight.at(id)>tmph[2]
+                        && sqrt(Pr.x()*Pr.x() - Pro.x()*Pro.x()) <= 0.1
+                        && sqrt(Pr.y()*Pr.y() - Pro.y()*Pro.y()) <= 0.1
+                        && sqrt(avgHeight.at(id)*avgHeight.at(id) - tmph[2]*tmph[2]) <= 0.1){
+                    tmph[0] = Pr.x();
+                    tmph[1] = Pr.y();
+                    tmph[2] = avgHeight.at(id);
+                    offset[0] = -range+i;
+                    offset[1] = -range+j;
+                }
+                //qDebug()<< "P: "<< id << "H: "<< avgHeight.at(id);
+            }
+        }
+        grasppt = {tmph[0], tmph[1], tmph[2]};
+    }
     //               qDebug() << "gx: " << grasppt[0] << "gy: "<< grasppt[1]<< "gz: " << grasppt[2];
     //                    qDebug() << "x: "<< graspx << "y: "<< graspy;
     //                    qDebug() << "tmph: " << tmph;
-                    }
-            }
+}
+}
 
-            // And finally we'll emit our signal
-            gLock.lockForWrite();
-            gCurrentGLFrame = QImage((uchar*) camimage.data, camimage.cols, camimage.rows, camimage.step, QImage::Format_BGR888);
-            gLock.unlock();
-            emit glUpdateRequest();
-        }
-    });
+// And finally we'll emit our signal
+gLock.lockForWrite();
+gCurrentGLFrame = QImage((uchar*) camimage.data, camimage.cols, camimage.rows, camimage.step, QImage::Format_BGR888);
+gLock.unlock();
+emit glUpdateRequest();
+}
+});
 }
 
 void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
@@ -5664,9 +5850,9 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
         try {
             torch::manual_seed(0);
 
-//            if ( !mDetector ) {
-//                mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
-//            }
+            //            if ( !mDetector ) {
+            //                mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
+            //            }
 
             device = torch::Device(torch::kCPU);
             if (torch::cuda::is_available()) {
@@ -5708,82 +5894,82 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
             actor_critic_target->q2->to(device);
 
             //-----------------------------------------------------------------------------
-//            //CV MAT TO TENSOR
-//            gCamimage.copyTo(Src);
-//            //cv::resize(Src, Src, cv::Size(4, 4));
+            //            //CV MAT TO TENSOR
+            //            gCamimage.copyTo(Src);
+            //            //cv::resize(Src, Src, cv::Size(4, 4));
 
-//            auto tensor_image = torch::from_blob(Src.data, { Src.rows, Src.cols, Src.channels() }, at::kByte);
-//            tensor_image = tensor_image.permute({ 2, 0, 1 });
-//            //tensor_image = tensor_image.unsqueeze(0);
-//            tensor_image = tensor_image.to(torch::kF32)/255;
-//            tensor_image.to(torch::kCPU);
+            //            auto tensor_image = torch::from_blob(Src.data, { Src.rows, Src.cols, Src.channels() }, at::kByte);
+            //            tensor_image = tensor_image.permute({ 2, 0, 1 });
+            //            //tensor_image = tensor_image.unsqueeze(0);
+            //            tensor_image = tensor_image.to(torch::kF32)/255;
+            //            tensor_image.to(torch::kCPU);
 
-//            //std::cout << "Src: " << std::endl << Src << std::endl;
-//            //std::cout << "Src tensor: " << std::endl << tensor_image*255 << std::endl;
+            //            //std::cout << "Src: " << std::endl << Src << std::endl;
+            //            //std::cout << "Src tensor: " << std::endl << tensor_image*255 << std::endl;
 
-//            //TENSOR TO CV MAT
-//            torch::Tensor out_tensor = tensor_image*255;
-//            out_tensor = out_tensor.permute({1, 2, 0}).to(torch::kF32);
-//            cv::Mat cv_mat(Src.rows, Src.cols, CV_32FC3, out_tensor.data_ptr());
-//            cv_mat.convertTo(cv_mat, CV_8UC3);
+            //            //TENSOR TO CV MAT
+            //            torch::Tensor out_tensor = tensor_image*255;
+            //            out_tensor = out_tensor.permute({1, 2, 0}).to(torch::kF32);
+            //            cv::Mat cv_mat(Src.rows, Src.cols, CV_32FC3, out_tensor.data_ptr());
+            //            cv_mat.convertTo(cv_mat, CV_8UC3);
 
-//            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
+            //            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
 
-//            gLock.lockForWrite();
-//            gWarpedImage = QImage((uchar*) Src.data, Src.cols, Src.rows, Src.step, QImage::Format_BGR888).copy();
-//            //gInvWarpImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
-//            gEdgeImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
-//            gLock.unlock();
-//            emit glUpdateRequest();
+            //            gLock.lockForWrite();
+            //            gWarpedImage = QImage((uchar*) Src.data, Src.cols, Src.rows, Src.step, QImage::Format_BGR888).copy();
+            //            //gInvWarpImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
+            //            gEdgeImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
+            //            gLock.unlock();
+            //            emit glUpdateRequest();
 
-//            return 0;
+            //            return 0;
             //-----------------------------------------------------------------------------
 
             //-----------------------------------------------------------------------------
             // Test
-//            QString filename_before_state_tensor = QString(memoryPath + "/0/before_state_tensor.pt");
-//            torch::Tensor before_state_tensor;
-//            torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
+            //            QString filename_before_state_tensor = QString(memoryPath + "/0/before_state_tensor.pt");
+            //            torch::Tensor before_state_tensor;
+            //            torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
 
-//            QString filename_before_pick = QString(memoryPath + "/0/before_pick_point_tensor.pt");
-//            torch::Tensor before_pick;
-//            torch::load(before_pick, filename_before_pick.toStdString());
+            //            QString filename_before_pick = QString(memoryPath + "/0/before_pick_point_tensor.pt");
+            //            torch::Tensor before_pick;
+            //            torch::load(before_pick, filename_before_pick.toStdString());
 
-//            before_state_tensor = before_state_tensor.unsqueeze(0).detach().to(device);
-//            before_pick = before_pick.unsqueeze(0).detach().to(device);
-//            auto out = actor_critic->pi->forward(before_state_tensor, before_pick, true, false);
+            //            before_state_tensor = before_state_tensor.unsqueeze(0).detach().to(device);
+            //            before_pick = before_pick.unsqueeze(0).detach().to(device);
+            //            auto out = actor_critic->pi->forward(before_state_tensor, before_pick, true, false);
 
-//            std::cout << "action: " << out.action << std::endl;
+            //            std::cout << "action: " << out.action << std::endl;
 
-//            //TENSOR TO CV MAT
-//            torch::Tensor out_tensor = before_state_tensor*255;
-//            auto out_tensor1 = out_tensor.index({3}).to(torch::kF32);
-//            cv::Mat cv_mat1(512, 512, CV_32FC1, out_tensor1.data_ptr());
-//            auto min = out_tensor1.min().item().toFloat();
-//            auto max = out_tensor1.max().item().toFloat();
-//            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max-min));
-//            cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
+            //            //TENSOR TO CV MAT
+            //            torch::Tensor out_tensor = before_state_tensor*255;
+            //            auto out_tensor1 = out_tensor.index({3}).to(torch::kF32);
+            //            cv::Mat cv_mat1(512, 512, CV_32FC1, out_tensor1.data_ptr());
+            //            auto min = out_tensor1.min().item().toFloat();
+            //            auto max = out_tensor1.max().item().toFloat();
+            //            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max-min));
+            //            cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
 
-//            auto out_tensor2 = out_tensor.index({1}).to(torch::kF32);
-//            cv::Mat cv_mat2(512, 512, CV_32FC1, out_tensor2.data_ptr());
-//            cv_mat2.convertTo(cv_mat2, CV_8U);
-//            cv::cvtColor(cv_mat2, cv_mat2, CV_GRAY2BGR);
+            //            auto out_tensor2 = out_tensor.index({1}).to(torch::kF32);
+            //            cv::Mat cv_mat2(512, 512, CV_32FC1, out_tensor2.data_ptr());
+            //            cv_mat2.convertTo(cv_mat2, CV_8U);
+            //            cv::cvtColor(cv_mat2, cv_mat2, CV_GRAY2BGR);
 
-//            auto out_tensor3= out_tensor.index({2}).to(torch::kF32);
-//            cv::Mat cv_mat3(512, 512, CV_32FC1, out_tensor3.data_ptr());
-//            cv_mat3.convertTo(cv_mat3, CV_8U);
-//            cv::cvtColor(cv_mat3, cv_mat3, CV_GRAY2BGR);
+            //            auto out_tensor3= out_tensor.index({2}).to(torch::kF32);
+            //            cv::Mat cv_mat3(512, 512, CV_32FC1, out_tensor3.data_ptr());
+            //            cv_mat3.convertTo(cv_mat3, CV_8U);
+            //            cv::cvtColor(cv_mat3, cv_mat3, CV_GRAY2BGR);
 
-//            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
+            //            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
 
-//            gLock.lockForWrite();
-//            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_BGR888).copy();
-//            gInvWarpImage = QImage((uchar*) cv_mat2.data, cv_mat2.cols, cv_mat2.rows, cv_mat2.step, QImage::Format_BGR888).copy();
-//            gEdgeImage = QImage((uchar*) cv_mat2.data, cv_mat3.cols, cv_mat3.rows, cv_mat3.step, QImage::Format_BGR888).copy();
-//            gLock.unlock();
-//            emit glUpdateRequest();
+            //            gLock.lockForWrite();
+            //            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_BGR888).copy();
+            //            gInvWarpImage = QImage((uchar*) cv_mat2.data, cv_mat2.cols, cv_mat2.rows, cv_mat2.step, QImage::Format_BGR888).copy();
+            //            gEdgeImage = QImage((uchar*) cv_mat2.data, cv_mat3.cols, cv_mat3.rows, cv_mat3.step, QImage::Format_BGR888).copy();
+            //            gLock.unlock();
+            //            emit glUpdateRequest();
 
-//            return 0;
+            //            return 0;
 
             //-----------------------------------------------------------------------------
 
@@ -5795,14 +5981,14 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
             bool LoadOldData = false;
             bool RestoreFromCheckpoint = false;
             if(RestoreFromCheckpoint || LoadOldData){
-//                int olddata_size = 0;
+                //                int olddata_size = 0;
 
                 if(LoadOldData){
                     qDebug() << "Load old data";
-//                    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
-//                        olddata_size++;
-//                    }
-//                    datasize = olddata_size;
+                    //                    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
+                    //                        olddata_size++;
+                    //                    }
+                    //                    datasize = olddata_size;
                     datasize = 10000;
                     qDebug() << "Data size: " << datasize;
 
@@ -5871,105 +6057,106 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                     torch::AutoGradMode data_copy_enable(true);
                 }
 
-    //            qDebug() << "Loading memory";
-
-    //            for(int i=0; i<datasize; i++){
-    //                qDebug() << "Memory loading: [" << i+1 << "/" << datasize << "]";
-    //                QString filename_id;
-    //                if(RestoreFromCheckpoint){
-    //                    filename_id = memoryPath + QString("/%1").arg(i);
-    //                } else {
-    //                    filename_id = olddatasavepath + QString("/%1").arg(i);
-    //                }
+                //            qDebug() << "Loading memory";
 
 
-    //                // Load tensor(.pt)
-    //                QString filename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
-    //                torch::Tensor before_state_tensor;
-    //                torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
+                //            for(int i=0; i<datasize; i++){
+                //                qDebug() << "Memory loading: [" << i+1 << "/" << datasize << "]";
+                //                QString filename_id;
+                //                if(RestoreFromCheckpoint){
+                //                    filename_id = memoryPath + QString("/%1").arg(i);
+                //                } else {
+                //                    filename_id = olddatasavepath + QString("/%1").arg(i);
+                //                }
 
-    //                QString filename_before_pick_point_tensor = QString(filename_id + "/before_pick_point_tensor.pt");
-    //                torch::Tensor before_pick_point_tensor;
-    //                torch::load(before_pick_point_tensor, filename_before_pick_point_tensor.toStdString());
 
-    //                QString filename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
-    //                torch::Tensor place_point_tensor;
-    //                torch::load(place_point_tensor, filename_place_point_tensor.toStdString());
+                //                // Load tensor(.pt)
+                //                QString filename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
+                //                torch::Tensor before_state_tensor;
+                //                torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
 
-    //                QString filename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
-    //                torch::Tensor reward_tensor;
-    //                torch::load(reward_tensor, filename_reward_tensor.toStdString());
+                //                QString filename_before_pick_point_tensor = QString(filename_id + "/before_pick_point_tensor.pt");
+                //                torch::Tensor before_pick_point_tensor;
+                //                torch::load(before_pick_point_tensor, filename_before_pick_point_tensor.toStdString());
 
-    //                QString filename_done_tensor = QString(filename_id + "/done_tensor.pt");
-    //                torch::Tensor done_tensor;
-    //                torch::load(done_tensor, filename_done_tensor.toStdString());
+                //                QString filename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
+                //                torch::Tensor place_point_tensor;
+                //                torch::load(place_point_tensor, filename_place_point_tensor.toStdString());
 
-    //                QString filename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
-    //                torch::Tensor after_state_tensor;
-    //                torch::load(after_state_tensor, filename_after_state_tensor.toStdString());
+                //                QString filename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
+                //                torch::Tensor reward_tensor;
+                //                torch::load(reward_tensor, filename_reward_tensor.toStdString());
 
-    //                QString filename_after_pick_point_tensor = QString(filename_id + "/after_pick_point_tensor.pt");
-    //                torch::Tensor after_pick_point_tensor;
-    //                torch::load(after_pick_point_tensor, filename_after_pick_point_tensor.toStdString());
+                //                QString filename_done_tensor = QString(filename_id + "/done_tensor.pt");
+                //                torch::Tensor done_tensor;
+                //                torch::load(done_tensor, filename_done_tensor.toStdString());
 
-                    // Load string(.txt)
-    //                QString filename_before_state = QString(filename_id + "/before_state.txt");
-    //                std::vector<float> before_state_vector;
-    //                loaddata(filename_before_state.toStdString(), before_state_vector);
-    //                torch::Tensor before_state_tensor = torch::from_blob(before_state_vector.data(), { 262147 }, torch::kFloat);
+                //                QString filename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
+                //                torch::Tensor after_state_tensor;
+                //                torch::load(after_state_tensor, filename_after_state_tensor.toStdString());
 
-    //                QString filename_place_point = QString(filename_id + "/place_point.txt");
-    //                std::vector<float> place_point_vector;
-    //                loaddata(filename_place_point.toStdString(), place_point_vector);
-    //                torch::Tensor place_point_tensor = torch::from_blob(place_point_vector.data(), { 3 }, torch::kFloat);
+                //                QString filename_after_pick_point_tensor = QString(filename_id + "/after_pick_point_tensor.pt");
+                //                torch::Tensor after_pick_point_tensor;
+                //                torch::load(after_pick_point_tensor, filename_after_pick_point_tensor.toStdString());
 
-    //                QString filename_reward = QString(filename_id + "/reward.txt");
-    //                std::vector<float> reward_vector;
-    //                loaddata(filename_reward.toStdString(), reward_vector);
-    //                torch::Tensor reward_tensor = torch::from_blob(reward_vector.data(), { 1 }, torch::kFloat);
+                // Load string(.txt)
+                //                QString filename_before_state = QString(filename_id + "/before_state.txt");
+                //                std::vector<float> before_state_vector;
+                //                loaddata(filename_before_state.toStdString(), before_state_vector);
+                //                torch::Tensor before_state_tensor = torch::from_blob(before_state_vector.data(), { 262147 }, torch::kFloat);
 
-    //                QString filename_done = QString(filename_id + "/done.txt");
-    //                std::vector<float> done_vector;
-    //                loaddata(filename_done.toStdString(), done_vector);
-    //                torch::Tensor done_tensor = torch::from_blob(done_vector.data(), { 1 }, torch::kFloat);
+                //                QString filename_place_point = QString(filename_id + "/place_point.txt");
+                //                std::vector<float> place_point_vector;
+                //                loaddata(filename_place_point.toStdString(), place_point_vector);
+                //                torch::Tensor place_point_tensor = torch::from_blob(place_point_vector.data(), { 3 }, torch::kFloat);
 
-    //                QString filename_after_state = QString(filename_id + "/after_state.txt");
-    //                std::vector<float> after_state_vector;
-    //                loaddata(filename_after_state.toStdString(), after_state_vector);
-    //                torch::Tensor after_state_tensor = torch::from_blob(after_state_vector.data(), { 262147 }, torch::kFloat);
+                //                QString filename_reward = QString(filename_id + "/reward.txt");
+                //                std::vector<float> reward_vector;
+                //                loaddata(filename_reward.toStdString(), reward_vector);
+                //                torch::Tensor reward_tensor = torch::from_blob(reward_vector.data(), { 1 }, torch::kFloat);
 
-    //                // Trans to tensor and save
-    //                QString sfilename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
-    //                torch::save(before_state_tensor, sfilename_before_state_tensor.toStdString());
+                //                QString filename_done = QString(filename_id + "/done.txt");
+                //                std::vector<float> done_vector;
+                //                loaddata(filename_done.toStdString(), done_vector);
+                //                torch::Tensor done_tensor = torch::from_blob(done_vector.data(), { 1 }, torch::kFloat);
 
-    //                QString sfilename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
-    //                torch::save(place_point_tensor, sfilename_place_point_tensor.toStdString());
+                //                QString filename_after_state = QString(filename_id + "/after_state.txt");
+                //                std::vector<float> after_state_vector;
+                //                loaddata(filename_after_state.toStdString(), after_state_vector);
+                //                torch::Tensor after_state_tensor = torch::from_blob(after_state_vector.data(), { 262147 }, torch::kFloat);
 
-    //                QString sfilename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
-    //                torch::save(reward_tensor, sfilename_reward_tensor.toStdString());
+                //                // Trans to tensor and save
+                //                QString sfilename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
+                //                torch::save(before_state_tensor, sfilename_before_state_tensor.toStdString());
 
-    //                QString sfilename_done_tensor = QString(filename_id + "/done_tensor.pt");
-    //                torch::save(done_tensor, sfilename_done_tensor.toStdString());
+                //                QString sfilename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
+                //                torch::save(place_point_tensor, sfilename_place_point_tensor.toStdString());
 
-    //                QString sfilename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
-    //                torch::save(after_state_tensor, sfilename_after_state_tensor.toStdString());
+                //                QString sfilename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
+                //                torch::save(reward_tensor, sfilename_reward_tensor.toStdString());
 
-    //                memory.push_back({before_state_tensor.clone().detach(),
-    //                                  before_pick_point_tensor.clone().detach(),
-    //                                  place_point_tensor.clone().detach(),
-    //                                  reward_tensor.clone().detach(),
-    //                                  done_tensor.clone().detach(),
-    //                                  after_state_tensor.clone().detach(),
-    //                                  after_pick_point_tensor.clone().detach()});
+                //                QString sfilename_done_tensor = QString(filename_id + "/done_tensor.pt");
+                //                torch::save(done_tensor, sfilename_done_tensor.toStdString());
 
-    //                std::cout << "before lowest: " << memory[i].before_state.min() << std::endl;
-    //                std::cout << "before highest: " << memory[i].before_state.max() << std::endl;
-    //                std::cout << "place_point: " << memory[i].place_point << std::endl;
-    //                std::cout << "reward: " << memory[i].reward << std::endl;
-    //                std::cout << "done: " << memory[i].done << std::endl;
-    //                std::cout << "after lowest: " << memory[i].after_state.min() << std::endl;
-    //                std::cout << "after highest: " << memory[i].after_state.max() << std::endl;
-    //            }
+                //                QString sfilename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
+                //                torch::save(after_state_tensor, sfilename_after_state_tensor.toStdString());
+
+                //                memory.push_back({before_state_tensor.clone().detach(),
+                //                                  before_pick_point_tensor.clone().detach(),
+                //                                  place_point_tensor.clone().detach(),
+                //                                  reward_tensor.clone().detach(),
+                //                                  done_tensor.clone().detach(),
+                //                                  after_state_tensor.clone().detach(),
+                //                                  after_pick_point_tensor.clone().detach()});
+
+                //                std::cout << "before lowest: " << memory[i].before_state.min() << std::endl;
+                //                std::cout << "before highest: " << memory[i].before_state.max() << std::endl;
+                //                std::cout << "place_point: " << memory[i].place_point << std::endl;
+                //                std::cout << "reward: " << memory[i].reward << std::endl;
+                //                std::cout << "done: " << memory[i].done << std::endl;
+                //                std::cout << "after lowest: " << memory[i].after_state.min() << std::endl;
+                //                std::cout << "after highest: " << memory[i].after_state.max() << std::endl;
+                //            }
             }
 
             if(!RestoreFromCheckpoint){
@@ -6042,11 +6229,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                         qDebug() << "\033[0;34mTesting model : Step [" << step+1 << "/" << teststep << "] started\033[0m";
                     } else {
                         qDebug() << "\033[0;34mEpisode " << episode+1 << ": Step [" << step+1 << "/" << maxstep << "] started\033[0m";
-    //                    if(done_old_data){
-    //                        qDebug() << "\033[0;34mTotal steps: " << total_steps << "\033[0m";
-    //                    } else {
-    //                        qDebug() << "\033[0;34mTotal steps / Old data size: [" << total_steps << "/" << datasize << "]\033[0m";
-    //                    }
+                        //                    if(done_old_data){
+                        //                        qDebug() << "\033[0;34mTotal steps: " << total_steps << "\033[0m";
+                        //                    } else {
+                        //                        qDebug() << "\033[0;34mTotal steps / Old data size: [" << total_steps << "/" << datasize << "]\033[0m";
+                        //                    }
 
                         qDebug() << "\033[0;34mTotal steps: " << total_steps+1;
                         qDebug() << "Unfolded step: ";
@@ -6066,140 +6253,140 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
 
                     if(done_old_data && reset_env){
                         // Reset garment
-/*
-                        gCamimage.copyTo(Src);
-                        std::vector<double> graspr(3);
-                        cv::Point grasp_pointr;
-                        cv::Mat inv_warp_imager;
-                        cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
-                        cv::resize(warped_image, inv_warp_imager, warped_image_size);
-                        cv::warpPerspective(inv_warp_imager, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
-                        cv::resize(warped_image, warped_image, warped_image_resize);
-                        warped_image = background - warped_image;
-                        warped_image = ~warped_image;
+                        /*
+                    gCamimage.copyTo(Src);
+                    std::vector<double> graspr(3);
+                    cv::Point grasp_pointr;
+                    cv::Mat inv_warp_imager;
+                    cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+                    cv::resize(warped_image, inv_warp_imager, warped_image_size);
+                    cv::warpPerspective(inv_warp_imager, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
+                    cv::resize(warped_image, warped_image, warped_image_resize);
+                    warped_image = background - warped_image;
+                    warped_image = ~warped_image;
 
-                        // Find contours
-                        cv::Mat src_gray;
-                        cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
-                        cv::blur( src_gray, src_gray, cv::Size(3,3) );
+                    // Find contours
+                    cv::Mat src_gray;
+                    cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
+                    cv::blur( src_gray, src_gray, cv::Size(3,3) );
 
-                        cv::Mat canny_output;
-                        cv::Canny( src_gray, canny_output, thresh, thresh*1.2 );
-                        std::vector<cv::Vec4i> hierarchyr;
-                        cv::Size sz = src_gray.size();
-                        imageWidth = sz.width;
-                        imageHeight = sz.height;
+                    cv::Mat canny_output;
+                    cv::Canny( src_gray, canny_output, thresh, thresh*1.2 );
+                    std::vector<cv::Vec4i> hierarchyr;
+                    cv::Size sz = src_gray.size();
+                    imageWidth = sz.width;
+                    imageHeight = sz.height;
 
-                        cv::findContours( canny_output, contours, hierarchyr, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
-                        drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
+                    cv::findContours( canny_output, contours, hierarchyr, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
+                    drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
 
-                        findgrasp(graspr, grasp_pointr, Rz, hierarchyr);
+                    findgrasp(graspr, grasp_pointr, Rz, hierarchyr);
 
-                        gLock.lockForWrite();
-                        gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
-                        gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
-                        gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
-                        gLock.unlock();
-                        emit glUpdateRequest();
+                    gLock.lockForWrite();
+                    gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
+                    gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
+                    gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
+                    gLock.unlock();
+                    emit glUpdateRequest();
 
-                        // Write the plan file
-                        QString filename = "/home/cpii/projects/scripts/move.sh";
-                        QFile file(filename);
+                    // Write the plan file
+                    QString filename = "/home/cpii/projects/scripts/move.sh";
+                    QFile file(filename);
 
-                        Rz = 0;
+                    Rz = 0;
 
-                        if (file.open(QIODevice::ReadWrite)) {
-                           file.setPermissions(QFileDevice::Permissions(1909));
-                           QTextStream stream(&file);
-                           stream << "#!/bin/bash" << "\n"
-                                  << "\n"
-                                  << "cd" << "\n"
-                                  << "\n"
-                                  << "source /opt/ros/foxy/setup.bash" << "\n"
-                                  << "\n"
-                                  << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                                  << "\n"
-                                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                                  << "\n"
-                                  << "cd tm_robot_gripper/" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-                //                  << "\n"
-                //                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 2" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-                //                  << "\n"
-                //                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-                //                  << "\n"
-                //                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 2" << "\n"
-                                  << "\n";
-                        } else {
-                           qDebug("file open error");
+                    if (file.open(QIODevice::ReadWrite)) {
+                       file.setPermissions(QFileDevice::Permissions(1909));
+                       QTextStream stream(&file);
+                       stream << "#!/bin/bash" << "\n"
+                              << "\n"
+                              << "cd" << "\n"
+                              << "\n"
+                              << "source /opt/ros/foxy/setup.bash" << "\n"
+                              << "\n"
+                              << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                              << "\n"
+                              << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                              << "\n"
+                              << "cd tm_robot_gripper/" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+            //                  << "\n"
+            //                  << "sleep 1" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                              << "\n"
+                              << "sleep 2" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                              << "\n"
+                              << "sleep 1" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+            //                  << "\n"
+            //                  << "sleep 1" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                              << "\n"
+                              << "sleep 1" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+            //                  << "\n"
+            //                  << "sleep 1" << "\n"
+                              << "\n"
+                              << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                              << "\n"
+                              << "sleep 2" << "\n"
+                              << "\n";
+                    } else {
+                       qDebug("file open error");
+                    }
+                    file.close();
+
+                    QProcess plan;
+                    QStringList planarg;
+
+                    planarg << "/home/cpii/projects/scripts/move.sh";
+                    plan.start("xterm", planarg);
+
+                    constexpr int timeout_count = 60000; //60000 mseconds
+                    if ( plan.waitForFinished(timeout_count)) {
+                        qDebug() << QString("\033[1;36m[%1] Env reset finished\033[0m")
+                                    .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
+                                    .toUtf8().data();
+                    } else {
+                        qWarning() << QString("\033[1;31mRobot action not finished within %1s\033[0m").arg(timeout_count*0.001);
+                        qWarning() << plan.errorString();
+                        plan.kill();
+                        plan.waitForFinished();
+
+                        bResetRobot = true;
+                    }
+                    if ( bResetRobot ) {
+                        QMetaObject::invokeMethod(this, "resetRViz",
+                                                  Qt::BlockingQueuedConnection);
+
+                        qDebug() << "\033[1;31mResetting Rviz.\033[0m";
+
+                        QDir dir(QString("%1/%2").arg(memoryPath).arg(datasize--));
+                        if (!dir.removeRecursively()) {
+                            qCritical() << "[Warning] Useless data cannot be deleted : " << datasize;
                         }
-                        file.close();
+                        total_steps--;
 
-                        QProcess plan;
-                        QStringList planarg;
-
-                        planarg << "/home/cpii/projects/scripts/move.sh";
-                        plan.start("xterm", planarg);
-
-                        constexpr int timeout_count = 60000; //60000 mseconds
-                        if ( plan.waitForFinished(timeout_count)) {
-                            qDebug() << QString("\033[1;36m[%1] Env reset finished\033[0m")
-                                        .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
-                                        .toUtf8().data();
-                        } else {
-                            qWarning() << QString("\033[1;31mRobot action not finished within %1s\033[0m").arg(timeout_count*0.001);
-                            qWarning() << plan.errorString();
-                            plan.kill();
-                            plan.waitForFinished();
-
-                            bResetRobot = true;
-                        }
-                        if ( bResetRobot ) {
-                            QMetaObject::invokeMethod(this, "resetRViz",
-                                                      Qt::BlockingQueuedConnection);
-
-                            qDebug() << "\033[1;31mResetting Rviz.\033[0m";
-
-                            QDir dir(QString("%1/%2").arg(memoryPath).arg(datasize--));
-                            if (!dir.removeRecursively()) {
-                                qCritical() << "[Warning] Useless data cannot be deleted : " << datasize;
-                            }
-                            total_steps--;
-
-                            if (!resetRobotPosition()){
-                                mRunReinforcementLearning1 = false;
-                                qDebug() << "\033[1;31mCan not reset Rviz, end training.\033[0m";
-                                break;
-                            }
-                            QThread::msleep(6000);  //Wait for the robot to reset
-
-                            qDebug() << QString("\n-----[ %1 ]-----\n")
-                                        .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
-                                        .toUtf8().data();
+                        if (!resetRobotPosition()){
+                            mRunReinforcementLearning1 = false;
+                            qDebug() << "\033[1;31mCan not reset Rviz, end training.\033[0m";
                             break;
                         }
-                        Sleeper::sleep(3);
+                        QThread::msleep(6000);  //Wait for the robot to reset
+
+                        qDebug() << QString("\n-----[ %1 ]-----\n")
+                                    .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
+                                    .toUtf8().data();
+                        break;
+                    }
+                    Sleeper::sleep(3);
 */
 
                         // Reset Environment
@@ -6243,7 +6430,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             src_tensor = src_tensor.permute({ 2, 0, 1 });
                             src_tensor = src_tensor.unsqueeze(0).to(torch::kF32)/255;
 
-    //                        src_tensor = torch::randn({3, 256, 256});
+                            //                        src_tensor = torch::randn({3, 256, 256});
 
                             // Find contours
 
@@ -6304,58 +6491,58 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                                 }
                             }
 
-//                            auto maxm = *std::max_element(avgHeight.begin(), avgHeight.end());
-//                            auto minm = *std::min_element(avgHeight.begin(), avgHeight.end());
-//                            auto max = *std::max_element(src_tableheight.begin(), src_tableheight.end());
-//                            auto min = *std::min_element(src_tableheight.begin(), src_tableheight.end());
-//                            std::cout<<"Max value: "<<max<< std::endl << "min: " << min << '\n';
-//                            std::cout<<"Max value m: "<<maxm<< std::endl << "min m: " << minm << '\n';
+                            //                            auto maxm = *std::max_element(avgHeight.begin(), avgHeight.end());
+                            //                            auto minm = *std::min_element(avgHeight.begin(), avgHeight.end());
+                            //                            auto max = *std::max_element(src_tableheight.begin(), src_tableheight.end());
+                            //                            auto min = *std::min_element(src_tableheight.begin(), src_tableheight.end());
+                            //                            std::cout<<"Max value: "<<max<< std::endl << "min: " << min << '\n';
+                            //                            std::cout<<"Max value m: "<<maxm<< std::endl << "min m: " << minm << '\n';
 
                             src_height_tensor = torch::from_blob(src_tableheight.data(), { 1, warped_image.rows, warped_image.cols }, at::kFloat);
                             src_height_tensor = src_height_tensor.to(torch::kF32);
 
-//                            auto min1 = src_height_tensor.min().item().toFloat();
-//                            auto max1 = src_height_tensor.max().item().toFloat();
-//                            std::cout << "out_tensor1: " << src_height_tensor.sizes() << std::endl << min1 << " " << max1 << std::endl;
-//                            src_height_tensor = src_height_tensor.squeeze();
-//                            cv::Mat cv_mat1(512, 512, CV_32FC1, src_height_tensor.data_ptr());
-//                            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(0.005-min1));
+                            //                            auto min1 = src_height_tensor.min().item().toFloat();
+                            //                            auto max1 = src_height_tensor.max().item().toFloat();
+                            //                            std::cout << "out_tensor1: " << src_height_tensor.sizes() << std::endl << min1 << " " << max1 << std::endl;
+                            //                            src_height_tensor = src_height_tensor.squeeze();
+                            //                            cv::Mat cv_mat1(512, 512, CV_32FC1, src_height_tensor.data_ptr());
+                            //                            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(0.005-min1));
 
-//                            gLock.lockForWrite();
-//                            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_Grayscale8).copy();
-//                            gLock.unlock();
-//                            emit glUpdateRequest();
+                            //                            gLock.lockForWrite();
+                            //                            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_Grayscale8).copy();
+                            //                            gLock.unlock();
+                            //                            emit glUpdateRequest();
 
-//                            return 0;
+                            //                            return 0;
 
-    //                        src_height_tensor = torch::randn({256, 256});
+                            //                        src_height_tensor = torch::randn({256, 256});
 
 
-//                            float angle = 0;
-//                            cv::Mat rotatedImg;
-//                            QImage rotatedImgqt;
-//                            for(int a = 0; a < 36; a++){
-//                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+                            //                            float angle = 0;
+                            //                            cv::Mat rotatedImg;
+                            //                            QImage rotatedImgqt;
+                            //                            for(int a = 0; a < 36; a++){
+                            //                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
 
-//                                QMatrix r;
+                            //                                QMatrix r;
 
-//                                r.rotate(angle*10.0);
+                            //                                r.rotate(angle*10.0);
 
-//                                rotatedImgqt = rotatedImgqt.transformed(r);
+                            //                                rotatedImgqt = rotatedImgqt.transformed(r);
 
-//                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+                            //                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
 
-//                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+                            //                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
 
-//                                if(test_result.size()>0){
-//                                    for(auto i=0; i<test_result.size(); i++){
-//                                        if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
-//                                            conf_before = test_result[i].prob;
-//                                        }
-//                                    }
-//                                }
-//                                angle+=1;
-//                            }
+                            //                                if(test_result.size()>0){
+                            //                                    for(auto i=0; i<test_result.size(); i++){
+                            //                                        if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
+                            //                                            conf_before = test_result[i].prob;
+                            //                                        }
+                            //                                    }
+                            //                                }
+                            //                                angle+=1;
+                            //                            }
 
                             findgrasp(grasp, grasp_point, Rz, hierarchy);
                             auto graspdis = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.1)*(grasp[2]+0.1));
@@ -6369,13 +6556,13 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
 
                                 // Find the location of grasp and release point
                                 const double invImageW = 1.0 / imageWidth,
-                                             invImageH = 1.0 / imageHeight;
+                                        invImageH = 1.0 / imageHeight;
 
                                 cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                  release_point.y*invImageH*warped_image_size.height);
+                                                                   release_point.y*invImageH*warped_image_size.height);
                                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                 float depth_pointr[2] = {0},
-                                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                 rs2_project_color_pixel_to_depth_pixel(depth_pointr, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointr);
                                 int P = int(depth_pointr[0])*depthh + depthh-int(depth_pointr[1]);
                                 cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
@@ -6389,11 +6576,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
 
                                 height = 0.01 * QRandomGenerator::global()->bounded(5,20);
                                 auto distance1 = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05)),
-                                     distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
+                                        distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
                                 while ( distance1 > robotDLimit
-                                      || distance2 > robotDLimit){
-        //                            qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
-        //                                        .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
+                                        || distance2 > robotDLimit){
+                                    //                            qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
+                                    //                                        .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
 
                                     gLock.lockForWrite();
                                     gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
@@ -6401,24 +6588,24 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                                     emit glUpdateRequest();
 
                                     if(   sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit
-                                       || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                          || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
 
-        //                                if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-        //                                    qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-        //                                }
-        //                                if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-        //                                    qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-        //                                }
-        //                                qDebug() << "Recalculate grasp and release point";
+                                        //                                if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                    qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                                }
+                                        //                                if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                    qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                                }
+                                        //                                qDebug() << "Recalculate grasp and release point";
 
                                         findgrasp(grasp, grasp_point, Rz, hierarchy);
                                         findrelease(release, release_point, grasp_point);
 
                                         cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                          release_point.y*invImageH*warped_image_size.height);
+                                                                           release_point.y*invImageH*warped_image_size.height);
                                         cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                         float depth_pointr[2] = {0},
-                                              color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                                color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                         rs2::frame depth;
                                         if(use_filter){
                                             depth = filtered_frame;
@@ -6451,11 +6638,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             src_height_tensor = src_height_tensor.flatten();
                             before_state = torch::cat({ src_tensor, src_height_tensor});
                             before_state = before_state.reshape({4, warped_image_resize.width, warped_image_resize.height});
-    //                        }
-    //                        torch::Tensor pick_point_tensor = torch::randn({3});
-    //                        auto src_tensor_flatten = torch::flatten(src_tensor);
-    //                        auto src_height_tensor_flatten = torch::flatten(src_height_tensor);
-    //                        before_state = torch::cat({ src_tensor_flatten, src_height_tensor_flatten, pick_point_tensor });
+                            //                        }
+                            //                        torch::Tensor pick_point_tensor = torch::randn({3});
+                            //                        auto src_tensor_flatten = torch::flatten(src_tensor);
+                            //                        auto src_height_tensor_flatten = torch::flatten(src_height_tensor);
+                            //                        before_state = torch::cat({ src_tensor_flatten, src_height_tensor_flatten, pick_point_tensor });
                         } else {
                             before_image = after_image_last;
                             before_state = after_state_last.clone().detach();
@@ -6508,7 +6695,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             qDebug() << "\033[1;33mStart exploration\033[0m";
                             place_point[0] = release_point.x/static_cast<float>(imageWidth); place_point[1] = release_point.y/static_cast<float>(imageHeight); place_point[2] = release[2]-gripper_length;
                             place_point_tensor = torch::from_blob(place_point.data(), { 3 }, at::kFloat);
-    //                        place_point_tensor = torch::randn({3});
+                            //                        place_point_tensor = torch::randn({3});
                             //std::cout << "place_point_tensor: " << place_point_tensor << std::endl;
                         } else {
                             qDebug() << "\033[1;33mStart exploitation\033[0m";
@@ -6527,10 +6714,10 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             release_point.x = place_point[0]*static_cast<float>(imageWidth); release_point.y = place_point[1]*static_cast<float>(imageHeight);
 
                             cv::Point2f warpedpr = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width,
-                                                              release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+                                                               release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
                             cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                             float depth_pointr[2] = {0},
-                                  color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                    color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                             rs2::frame depth;
                             if(use_filter){
                                 depth = filtered_frame;
@@ -6554,10 +6741,10 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             qDebug() << "distance1: " << distance1 << "distance2: " << distance2;
                             //qDebug() << "place_point: " << place_point[0] << " " << place_point[1] << " " << place_point[2];
                             if(distance1 >= robotDLimit || distance2 >= robotDLimit
-                               || place_point[2] < 0.05 || place_point[2] > 0.25
-                               || (place_point[0] > 0.6 && place_point[1] > 0.6)
-                               || place_point[0] < 0.1 || place_point[0] > 0.9
-                               || place_point[1] < 0.1 || place_point[1] > 0.9){
+                                    || place_point[2] < 0.05 || place_point[2] > 0.25
+                                    || (place_point[0] > 0.6 && place_point[1] > 0.6)
+                                    || place_point[0] < 0.1 || place_point[0] > 0.9
+                                    || place_point[1] < 0.1 || place_point[1] > 0.9){
                                 qDebug() << "\033[1;31m";
                                 if(distance1 >= robotDLimit){
                                     qDebug() << "Error: distance1 >= robotDLimit";
@@ -6629,58 +6816,58 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             Rz = 0;
 
                             if (file.open(QIODevice::ReadWrite)) {
-                               file.setPermissions(QFileDevice::Permissions(1909));
-                               QTextStream stream(&file);
-                               stream << "#!/bin/bash" << "\n"
-                                      << "\n"
-                                      << "cd" << "\n"
-                                      << "\n"
-                                      << "source /opt/ros/foxy/setup.bash" << "\n"
-                                      << "\n"
-                                      << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                                      << "\n"
-                                      << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                                      << "\n"
-                                      << "cd tm_robot_gripper/" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                                      << "sleep 2" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                    //                << "sleep 1" << "\n"
-                    //                << "\n"
-                                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                                      << "sleep 2" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-                    //                << "\n"
-                    //                << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                                      << "sleep 2" << "\n"
-                                      << "\n";
+                                file.setPermissions(QFileDevice::Permissions(1909));
+                                QTextStream stream(&file);
+                                stream << "#!/bin/bash" << "\n"
+                                       << "\n"
+                                       << "cd" << "\n"
+                                       << "\n"
+                                       << "source /opt/ros/foxy/setup.bash" << "\n"
+                                       << "\n"
+                                       << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                                       << "\n"
+                                       << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                                       << "\n"
+                                       << "cd tm_robot_gripper/" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                       << "sleep 2" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                          //                << "sleep 1" << "\n"
+                                          //                << "\n"
+                                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                       << "sleep 2" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                                          //                << "\n"
+                                          //                << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                       << "sleep 2" << "\n"
+                                       << "\n";
                             } else {
-                               qDebug("file open error");
+                                qDebug("file open error");
                             }
                             file.close();
 
@@ -6746,7 +6933,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             after_image_tensor = after_image_tensor.permute({ 2, 0, 1 });
                             after_image_tensor = after_image_tensor.unsqueeze(0).to(torch::kF32)/255;
 
-    //                      torch::Tensor after_image_tensor = torch::randn({3, 256, 256});
+                            //                      torch::Tensor after_image_tensor = torch::randn({3, 256, 256});
 
                             mCalAveragePoint = true;
                             mCalAvgMat = true;
@@ -6793,34 +6980,34 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             after_height_tensor = torch::from_blob(after_tableheight.data(), { 1, warped_image.rows, warped_image.cols }, at::kFloat);
                             after_height_tensor = after_height_tensor.to(torch::kF32);
 
-    //                      after_height_tensor = torch::randn({256, 256});
+                            //                      after_height_tensor = torch::randn({256, 256});
 
-//                            float angle = 0;
-//                            cv::Mat rotatedImg;
-//                            QImage rotatedImgqt;
-//                            for(int a = 0; a < 36; a++){
-//                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+                            //                            float angle = 0;
+                            //                            cv::Mat rotatedImg;
+                            //                            QImage rotatedImgqt;
+                            //                            for(int a = 0; a < 36; a++){
+                            //                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
 
-//                                QMatrix r;
+                            //                                QMatrix r;
 
-//                                r.rotate(angle*10.0);
+                            //                                r.rotate(angle*10.0);
 
-//                                rotatedImgqt = rotatedImgqt.transformed(r);
+                            //                                rotatedImgqt = rotatedImgqt.transformed(r);
 
-//                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+                            //                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
 
-//                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+                            //                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
 
-//                                if(test_result.size()>0){
-//                                    for(auto i =0; i<test_result.size(); i++){
-//                                        if(test_result[i].obj_id == 1 && conf_after < test_result[i].prob && test_result[i].prob > 0.5){
-//                                            conf_after = test_result[i].prob;
-//                                        }
-//                                    }
-//                                }
-//                                angle+=1;
-//                            }
-//                            qDebug() << "\033[1;32mClasscification confidence level after action: \033[0m" << conf_after;
+                            //                                if(test_result.size()>0){
+                            //                                    for(auto i =0; i<test_result.size(); i++){
+                            //                                        if(test_result[i].obj_id == 1 && conf_after < test_result[i].prob && test_result[i].prob > 0.5){
+                            //                                            conf_after = test_result[i].prob;
+                            //                                        }
+                            //                                    }
+                            //                                }
+                            //                                angle+=1;
+                            //                            }
+                            //                            qDebug() << "\033[1;32mClasscification confidence level after action: \033[0m" << conf_after;
 
                             // Get after state
 
@@ -6850,13 +7037,13 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
 
                                 // Find the location of grasp and release point
                                 const double invImageW = 1.0 / imageWidth,
-                                             invImageH = 1.0 / imageHeight;
+                                        invImageH = 1.0 / imageHeight;
 
                                 cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                  release_point.y*invImageH*warped_image_size.height);
+                                                                   release_point.y*invImageH*warped_image_size.height);
                                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                 float depth_pointr[2] = {0},
-                                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                 rs2_project_color_pixel_to_depth_pixel(depth_pointr, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointr);
                                 int P = int(depth_pointr[0])*depthh + depthh-int(depth_pointr[1]);
                                 cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
@@ -6870,11 +7057,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
 
                                 height = 0.01 * QRandomGenerator::global()->bounded(5,20);
                                 auto distance1 = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05)),
-                                     distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
+                                        distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
                                 while ( distance1 > robotDLimit
-                                      || distance2 > robotDLimit){
-            //                        qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
-            //                                    .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
+                                        || distance2 > robotDLimit){
+                                    //                        qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
+                                    //                                    .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
 
                                     gLock.lockForWrite();
                                     gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
@@ -6882,25 +7069,25 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                                     emit glUpdateRequest();
 
                                     if(   sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit
-                                       || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                          || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
 
-            //                            if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-            //                                qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-            //                            }
-            //                            if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-            //                                qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-            //                            }
+                                        //                            if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                            }
+                                        //                            if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                            }
 
-            //                            qDebug() << "Recalculate grasp and release point";
+                                        //                            qDebug() << "Recalculate grasp and release point";
 
                                         findgrasp(grasp, grasp_point, Rz, hierarchy);
                                         findrelease(release, release_point, grasp_point);
 
                                         cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                          release_point.y*invImageH*warped_image_size.height);
+                                                                           release_point.y*invImageH*warped_image_size.height);
                                         cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                         float depth_pointr[2] = {0},
-                                              color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                                color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                         rs2::frame depth;
                                         if(use_filter){
                                             depth = filtered_frame;
@@ -6954,16 +7141,16 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             after_state = torch::cat({ after_image_tensor, after_height_tensor});
                             after_state = after_state.reshape({4, warped_image_resize.width, warped_image_resize.height});
 
-    //                      max_height_before = rand()%200/10.0f;
-    //                      max_height_after = rand()%200/10.0f;
-    //                      garment_area_before = rand()%10000;
-    //                      garment_area_after = rand()%10000;
-    //                      conf_before = 0;
-    //                      conf_after = 0;
-    //                      auto after_image_flatten = torch::flatten(after_image_tensor);
-    //                      auto after_height_tensor_flatten = torch::flatten(after_height_tensor);
-    //                      torch::Tensor pick_point2_tensor = torch::randn({3});
-    //                      auto after_state = torch::cat({ after_image_flatten, after_height_tensor_flatten, pick_point2_tensor });
+                            //                      max_height_before = rand()%200/10.0f;
+                            //                      max_height_after = rand()%200/10.0f;
+                            //                      garment_area_before = rand()%10000;
+                            //                      garment_area_after = rand()%10000;
+                            //                      conf_before = 0;
+                            //                      conf_after = 0;
+                            //                      auto after_image_flatten = torch::flatten(after_image_tensor);
+                            //                      auto after_height_tensor_flatten = torch::flatten(after_height_tensor);
+                            //                      torch::Tensor pick_point2_tensor = torch::randn({3});
+                            //                      auto after_state = torch::cat({ after_image_flatten, after_height_tensor_flatten, pick_point2_tensor });
 
                             float height_reward, garment_area_reward, conf_reward;
                             height_reward = 5000 * (max_height_before - max_height_after);
@@ -6991,19 +7178,19 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             qDebug() << "\033[1;31mGarment is unfolded, end episode\033[0m";
                         }
 
-//                        if (max_height_after < 0.017 && conf_after > 0.7) { // Max height when garment unfolded is about 0.015m, conf level is about 0.75
-//                            done[0] = 1.0;
-//                            stepreward[0] += 5000;
-//                            garment_unfolded = true;
-//                            qDebug() << "\033[1;31mGarment is unfolded, end episode\033[0m";
-//                        }
+                        //                        if (max_height_after < 0.017 && conf_after > 0.7) { // Max height when garment unfolded is about 0.015m, conf level is about 0.75
+                        //                            done[0] = 1.0;
+                        //                            stepreward[0] += 5000;
+                        //                            garment_unfolded = true;
+                        //                            qDebug() << "\033[1;31mGarment is unfolded, end episode\033[0m";
+                        //                        }
 
                         if (exceed_limit){
                             if(test_model){
                                 reset_env = true;
                             }
                             done[0] = 1.0;
-                            stepreward[0] = -10000;
+                            stepreward[0] = 0.0;
                             after_image_last = after_image;
                             after_state_last = before_state.clone().detach();
                             after_pick_point_last = before_pick_point_tensor.clone().detach();
@@ -7084,10 +7271,10 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                         episode_reward += stepreward[0];
 
                         // Only save data with reward <=-100 and >200
-//                        if (total_steps < START_STEP && stepreward[0] > -100 && stepreward[0] < 200){
-//                            qDebug() << "\033[1;31mReward between -100 to 200, redo.\033[0m";
-//                            continue;
-//                        }
+                        //                        if (total_steps < START_STEP && stepreward[0] > -100 && stepreward[0] < 200){
+                        //                            qDebug() << "\033[1;31mReward between -100 to 200, redo.\033[0m";
+                        //                            continue;
+                        //                        }
 
                         if(test_model){
                             auto future_savedata = QtConcurrent::run([before_image = before_image,
@@ -7163,33 +7350,33 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                             done_tensor = torch::from_blob(done.data(), { 1 }, torch::kFloat);
                             //std::cout << "done_tensor: " << done_tensor << std::endl;
 
-        //                    if (memory.size() >= 10000) {
-        //                        memory.pop_front();
-        //                    }
+                            //                    if (memory.size() >= 10000) {
+                            //                        memory.pop_front();
+                            //                    }
 
-    //                        memory.push_back({
-    //                            before_state.clone().detach(),
-    //                            before_pick_point_tensor.clone().detach(),
-    //                            place_point_tensor.clone().detach(),
-    //                            reward_tensor.clone().detach(),
-    //                            done_tensor.clone().detach(),
-    //                            after_state.clone().detach(),
-    //                            after_pick_point_tensor.clone().detach()
-    //                            });
+                            //                        memory.push_back({
+                            //                            before_state.clone().detach(),
+                            //                            before_pick_point_tensor.clone().detach(),
+                            //                            place_point_tensor.clone().detach(),
+                            //                            reward_tensor.clone().detach(),
+                            //                            done_tensor.clone().detach(),
+                            //                            after_state.clone().detach(),
+                            //                            after_pick_point_tensor.clone().detach()
+                            //                            });
 
-            //                    std::cout << "before_state: " << memory[step].before_state.mean() << std::endl
-            //                              << "place_point_tensor: " << memory[step].place_point_tensor << std::endl
-            //                              << "reward_tensor: " << memory[step].reward_tensor << std::endl
-            //                              << "done_tensor: " << memory[step].done_tensor << std::endl
-            //                              << "after_state: " << memory[step].after_state.mean() << std::endl;
+                            //                    std::cout << "before_state: " << memory[step].before_state.mean() << std::endl
+                            //                              << "place_point_tensor: " << memory[step].place_point_tensor << std::endl
+                            //                              << "reward_tensor: " << memory[step].reward_tensor << std::endl
+                            //                              << "done_tensor: " << memory[step].done_tensor << std::endl
+                            //                              << "after_state: " << memory[step].after_state.mean() << std::endl;
 
-    //                        std::cout << "before_state: " << before_state.sizes() << std::endl;
-    //                        std::cout << "before_pick_point_tensor: " << before_pick_point_tensor.sizes() << std::endl;
-    //                        std::cout << "place_point_tensor: " << place_point_tensor.sizes() << std::endl;
-    //                        std::cout << "reward_tensor: " << reward_tensor.sizes() << std::endl;
-    //                        std::cout << "done_tensor: " << done_tensor.sizes() << std::endl;
-    //                        std::cout << "after_state: " << after_state.sizes() << std::endl;
-    //                        std::cout << "after_pick_point_tensor: " << after_pick_point_tensor.sizes() << std::endl;
+                            //                        std::cout << "before_state: " << before_state.sizes() << std::endl;
+                            //                        std::cout << "before_pick_point_tensor: " << before_pick_point_tensor.sizes() << std::endl;
+                            //                        std::cout << "place_point_tensor: " << place_point_tensor.sizes() << std::endl;
+                            //                        std::cout << "reward_tensor: " << reward_tensor.sizes() << std::endl;
+                            //                        std::cout << "done_tensor: " << done_tensor.sizes() << std::endl;
+                            //                        std::cout << "after_state: " << after_state.sizes() << std::endl;
+                            //                        std::cout << "after_pick_point_tensor: " << after_pick_point_tensor.sizes() << std::endl;
 
                             auto future_savedata = QtConcurrent::run([before_image = before_image,
                                                                      before_state_CPU = before_state.clone().detach(),
@@ -7311,8 +7498,12 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                                 if(done_old_data){
                                     qDebug() << "\033[1;33mTraining model: [" << train+1 << "/" << TRAINEVERY << "]\033[0m";
                                 }
-                                int randomdata = rand()%(10000-batch_size+1);
-                                randomdata = total_steps - 10000 + randomdata;
+                                int randomdata = 0;
+                                if(total_steps > 10000){
+                                    randomdata = total_steps - 10000 + rand()%(10000-batch_size+1);
+                                } else {
+                                    randomdata = rand()%(total_steps-batch_size+1);
+                                }
                                 //qDebug() << "randomdata: " << randomdata;
                                 //qDebug() << "memory size: " << memory.size();
                                 std::vector<torch::Tensor> s_data(batch_size), p_data(batch_size), a_data(batch_size), r_data(batch_size), d_data(batch_size), s2_data(batch_size), p2_data(batch_size);
@@ -7399,8 +7590,8 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
 
                                 // MSE loss against Bellman backup
                                 torch::AutoGradMode loss_enable(true);
-//                                torch::Tensor loss_q1 = torch::mean(pow(q1 - backup, 2)); // JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-//                                torch::Tensor loss_q2 = torch::mean(pow(q2 - backup, 2));
+                                //                                torch::Tensor loss_q1 = torch::mean(pow(q1 - backup, 2)); // JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+                                //                                torch::Tensor loss_q2 = torch::mean(pow(q2 - backup, 2));
                                 torch::Tensor loss_q1 = torch::nn::functional::mse_loss(q1, backup);
                                 torch::Tensor loss_q2 = torch::nn::functional::mse_loss(q2, backup);
                                 torch::Tensor loss_q = loss_q1 + loss_q2;
@@ -7517,12 +7708,12 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_1(){
                     episode_policy_loss = episode_policy_loss / (float)train_number;
 
                     qDebug() << "\033[0;35m--------------------------------------------" << "\n"
-                        << "Episode: " << episode << "\n"
-                        << "Reward: " << episode_reward << "\n"
-                        << "Critic 1 Loss: " << episode_critic1_loss << "\n"
-                        << "Critic 2 Loss: " << episode_critic2_loss << "\n"
-                        << "Policy Loss: " << episode_policy_loss << "\n"
-                        << "--------------------------------------------\033[0m";
+                             << "Episode: " << episode << "\n"
+                             << "Reward: " << episode_reward << "\n"
+                             << "Critic 1 Loss: " << episode_critic1_loss << "\n"
+                             << "Critic 2 Loss: " << episode_critic2_loss << "\n"
+                             << "Policy Loss: " << episode_policy_loss << "\n"
+                             << "--------------------------------------------\033[0m";
                     logger.add_scalar("Episode_Reward", episode, episode_reward);
                     logger.add_scalar("Episode_Critic_1_Loss", episode, episode_critic1_loss);
                     logger.add_scalar("Episode_Critic_2_Loss", episode, episode_critic2_loss);
@@ -7614,9 +7805,9 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
         try {
             torch::manual_seed(0);
 
-//            if ( !mDetector ) {
-//                mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
-//            }
+            //            if ( !mDetector ) {
+            //                mDetector = std::make_shared<Detector>("/home/cpii/darknet-master/yolo_models/yolov3-df2.cfg", "/home/cpii/darknet-master/yolo_models/yolov3-df2_15000.weights");
+            //            }
 
             device = torch::Device(torch::kCPU);
             if (torch::cuda::is_available()) {
@@ -7658,82 +7849,82 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
             actor_critic_target->q2->to(device);
 
             //-----------------------------------------------------------------------------
-//            //CV MAT TO TENSOR
-//            gCamimage.copyTo(Src);
-//            //cv::resize(Src, Src, cv::Size(4, 4));
+            //            //CV MAT TO TENSOR
+            //            gCamimage.copyTo(Src);
+            //            //cv::resize(Src, Src, cv::Size(4, 4));
 
-//            auto tensor_image = torch::from_blob(Src.data, { Src.rows, Src.cols, Src.channels() }, at::kByte);
-//            tensor_image = tensor_image.permute({ 2, 0, 1 });
-//            //tensor_image = tensor_image.unsqueeze(0);
-//            tensor_image = tensor_image.to(torch::kF32)/255;
-//            tensor_image.to(torch::kCPU);
+            //            auto tensor_image = torch::from_blob(Src.data, { Src.rows, Src.cols, Src.channels() }, at::kByte);
+            //            tensor_image = tensor_image.permute({ 2, 0, 1 });
+            //            //tensor_image = tensor_image.unsqueeze(0);
+            //            tensor_image = tensor_image.to(torch::kF32)/255;
+            //            tensor_image.to(torch::kCPU);
 
-//            //std::cout << "Src: " << std::endl << Src << std::endl;
-//            //std::cout << "Src tensor: " << std::endl << tensor_image*255 << std::endl;
+            //            //std::cout << "Src: " << std::endl << Src << std::endl;
+            //            //std::cout << "Src tensor: " << std::endl << tensor_image*255 << std::endl;
 
-//            //TENSOR TO CV MAT
-//            torch::Tensor out_tensor = tensor_image*255;
-//            out_tensor = out_tensor.permute({1, 2, 0}).to(torch::kF32);
-//            cv::Mat cv_mat(Src.rows, Src.cols, CV_32FC3, out_tensor.data_ptr());
-//            cv_mat.convertTo(cv_mat, CV_8UC3);
+            //            //TENSOR TO CV MAT
+            //            torch::Tensor out_tensor = tensor_image*255;
+            //            out_tensor = out_tensor.permute({1, 2, 0}).to(torch::kF32);
+            //            cv::Mat cv_mat(Src.rows, Src.cols, CV_32FC3, out_tensor.data_ptr());
+            //            cv_mat.convertTo(cv_mat, CV_8UC3);
 
-//            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
+            //            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
 
-//            gLock.lockForWrite();
-//            gWarpedImage = QImage((uchar*) Src.data, Src.cols, Src.rows, Src.step, QImage::Format_BGR888).copy();
-//            //gInvWarpImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
-//            gEdgeImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
-//            gLock.unlock();
-//            emit glUpdateRequest();
+            //            gLock.lockForWrite();
+            //            gWarpedImage = QImage((uchar*) Src.data, Src.cols, Src.rows, Src.step, QImage::Format_BGR888).copy();
+            //            //gInvWarpImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
+            //            gEdgeImage = QImage((uchar*) cv_mat.data, cv_mat.cols, cv_mat.rows, cv_mat.step, QImage::Format_BGR888).copy();
+            //            gLock.unlock();
+            //            emit glUpdateRequest();
 
-//            return 0;
+            //            return 0;
             //-----------------------------------------------------------------------------
 
             //-----------------------------------------------------------------------------
             // Test
-//            QString filename_before_state_tensor = QString(memoryPath + "/0/before_state_tensor.pt");
-//            torch::Tensor before_state_tensor;
-//            torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
+            //            QString filename_before_state_tensor = QString(memoryPath + "/0/before_state_tensor.pt");
+            //            torch::Tensor before_state_tensor;
+            //            torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
 
-//            QString filename_before_pick = QString(memoryPath + "/0/before_pick_point_tensor.pt");
-//            torch::Tensor before_pick;
-//            torch::load(before_pick, filename_before_pick.toStdString());
+            //            QString filename_before_pick = QString(memoryPath + "/0/before_pick_point_tensor.pt");
+            //            torch::Tensor before_pick;
+            //            torch::load(before_pick, filename_before_pick.toStdString());
 
-//            before_state_tensor = before_state_tensor.unsqueeze(0).detach().to(device);
-//            before_pick = before_pick.unsqueeze(0).detach().to(device);
-//            auto out = actor_critic->pi->forward(before_state_tensor, before_pick, true, false);
+            //            before_state_tensor = before_state_tensor.unsqueeze(0).detach().to(device);
+            //            before_pick = before_pick.unsqueeze(0).detach().to(device);
+            //            auto out = actor_critic->pi->forward(before_state_tensor, before_pick, true, false);
 
-//            std::cout << "action: " << out.action << std::endl;
+            //            std::cout << "action: " << out.action << std::endl;
 
-//            //TENSOR TO CV MAT
-//            torch::Tensor out_tensor = before_state_tensor*255;
-//            auto out_tensor1 = out_tensor.index({3}).to(torch::kF32);
-//            cv::Mat cv_mat1(512, 512, CV_32FC1, out_tensor1.data_ptr());
-//            auto min = out_tensor1.min().item().toFloat();
-//            auto max = out_tensor1.max().item().toFloat();
-//            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max-min));
-//            cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
+            //            //TENSOR TO CV MAT
+            //            torch::Tensor out_tensor = before_state_tensor*255;
+            //            auto out_tensor1 = out_tensor.index({3}).to(torch::kF32);
+            //            cv::Mat cv_mat1(512, 512, CV_32FC1, out_tensor1.data_ptr());
+            //            auto min = out_tensor1.min().item().toFloat();
+            //            auto max = out_tensor1.max().item().toFloat();
+            //            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(max-min));
+            //            cv::cvtColor(cv_mat1, cv_mat1, CV_GRAY2BGR);
 
-//            auto out_tensor2 = out_tensor.index({1}).to(torch::kF32);
-//            cv::Mat cv_mat2(512, 512, CV_32FC1, out_tensor2.data_ptr());
-//            cv_mat2.convertTo(cv_mat2, CV_8U);
-//            cv::cvtColor(cv_mat2, cv_mat2, CV_GRAY2BGR);
+            //            auto out_tensor2 = out_tensor.index({1}).to(torch::kF32);
+            //            cv::Mat cv_mat2(512, 512, CV_32FC1, out_tensor2.data_ptr());
+            //            cv_mat2.convertTo(cv_mat2, CV_8U);
+            //            cv::cvtColor(cv_mat2, cv_mat2, CV_GRAY2BGR);
 
-//            auto out_tensor3= out_tensor.index({2}).to(torch::kF32);
-//            cv::Mat cv_mat3(512, 512, CV_32FC1, out_tensor3.data_ptr());
-//            cv_mat3.convertTo(cv_mat3, CV_8U);
-//            cv::cvtColor(cv_mat3, cv_mat3, CV_GRAY2BGR);
+            //            auto out_tensor3= out_tensor.index({2}).to(torch::kF32);
+            //            cv::Mat cv_mat3(512, 512, CV_32FC1, out_tensor3.data_ptr());
+            //            cv_mat3.convertTo(cv_mat3, CV_8U);
+            //            cv::cvtColor(cv_mat3, cv_mat3, CV_GRAY2BGR);
 
-//            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
+            //            //std::cout << "cv_mat: " << std::endl << cv_mat << std::endl;
 
-//            gLock.lockForWrite();
-//            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_BGR888).copy();
-//            gInvWarpImage = QImage((uchar*) cv_mat2.data, cv_mat2.cols, cv_mat2.rows, cv_mat2.step, QImage::Format_BGR888).copy();
-//            gEdgeImage = QImage((uchar*) cv_mat2.data, cv_mat3.cols, cv_mat3.rows, cv_mat3.step, QImage::Format_BGR888).copy();
-//            gLock.unlock();
-//            emit glUpdateRequest();
+            //            gLock.lockForWrite();
+            //            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_BGR888).copy();
+            //            gInvWarpImage = QImage((uchar*) cv_mat2.data, cv_mat2.cols, cv_mat2.rows, cv_mat2.step, QImage::Format_BGR888).copy();
+            //            gEdgeImage = QImage((uchar*) cv_mat2.data, cv_mat3.cols, cv_mat3.rows, cv_mat3.step, QImage::Format_BGR888).copy();
+            //            gLock.unlock();
+            //            emit glUpdateRequest();
 
-//            return 0;
+            //            return 0;
 
             //-----------------------------------------------------------------------------
 
@@ -7745,14 +7936,14 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
             bool LoadOldData = false;
             bool RestoreFromCheckpoint = false;
             if(RestoreFromCheckpoint || LoadOldData){
-//                int olddata_size = 0;
+                //                int olddata_size = 0;
 
                 if(LoadOldData){
                     qDebug() << "Load old data";
-//                    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
-//                        olddata_size++;
-//                    }
-//                    datasize = olddata_size;
+                    //                    for (const auto & file : std::filesystem::directory_iterator(memoryPath.toStdString())){
+                    //                        olddata_size++;
+                    //                    }
+                    //                    datasize = olddata_size;
                     datasize = 10000;
                     qDebug() << "Data size: " << datasize;
 
@@ -7821,105 +8012,105 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                     torch::AutoGradMode data_copy_enable(true);
                 }
 
-    //            qDebug() << "Loading memory";
+                //            qDebug() << "Loading memory";
 
-    //            for(int i=0; i<datasize; i++){
-    //                qDebug() << "Memory loading: [" << i+1 << "/" << datasize << "]";
-    //                QString filename_id;
-    //                if(RestoreFromCheckpoint){
-    //                    filename_id = memoryPath + QString("/%1").arg(i);
-    //                } else {
-    //                    filename_id = olddatasavepath + QString("/%1").arg(i);
-    //                }
+                //            for(int i=0; i<datasize; i++){
+                //                qDebug() << "Memory loading: [" << i+1 << "/" << datasize << "]";
+                //                QString filename_id;
+                //                if(RestoreFromCheckpoint){
+                //                    filename_id = memoryPath + QString("/%1").arg(i);
+                //                } else {
+                //                    filename_id = olddatasavepath + QString("/%1").arg(i);
+                //                }
 
 
-    //                // Load tensor(.pt)
-    //                QString filename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
-    //                torch::Tensor before_state_tensor;
-    //                torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
+                //                // Load tensor(.pt)
+                //                QString filename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
+                //                torch::Tensor before_state_tensor;
+                //                torch::load(before_state_tensor, filename_before_state_tensor.toStdString());
 
-    //                QString filename_before_pick_point_tensor = QString(filename_id + "/before_pick_point_tensor.pt");
-    //                torch::Tensor before_pick_point_tensor;
-    //                torch::load(before_pick_point_tensor, filename_before_pick_point_tensor.toStdString());
+                //                QString filename_before_pick_point_tensor = QString(filename_id + "/before_pick_point_tensor.pt");
+                //                torch::Tensor before_pick_point_tensor;
+                //                torch::load(before_pick_point_tensor, filename_before_pick_point_tensor.toStdString());
 
-    //                QString filename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
-    //                torch::Tensor place_point_tensor;
-    //                torch::load(place_point_tensor, filename_place_point_tensor.toStdString());
+                //                QString filename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
+                //                torch::Tensor place_point_tensor;
+                //                torch::load(place_point_tensor, filename_place_point_tensor.toStdString());
 
-    //                QString filename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
-    //                torch::Tensor reward_tensor;
-    //                torch::load(reward_tensor, filename_reward_tensor.toStdString());
+                //                QString filename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
+                //                torch::Tensor reward_tensor;
+                //                torch::load(reward_tensor, filename_reward_tensor.toStdString());
 
-    //                QString filename_done_tensor = QString(filename_id + "/done_tensor.pt");
-    //                torch::Tensor done_tensor;
-    //                torch::load(done_tensor, filename_done_tensor.toStdString());
+                //                QString filename_done_tensor = QString(filename_id + "/done_tensor.pt");
+                //                torch::Tensor done_tensor;
+                //                torch::load(done_tensor, filename_done_tensor.toStdString());
 
-    //                QString filename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
-    //                torch::Tensor after_state_tensor;
-    //                torch::load(after_state_tensor, filename_after_state_tensor.toStdString());
+                //                QString filename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
+                //                torch::Tensor after_state_tensor;
+                //                torch::load(after_state_tensor, filename_after_state_tensor.toStdString());
 
-    //                QString filename_after_pick_point_tensor = QString(filename_id + "/after_pick_point_tensor.pt");
-    //                torch::Tensor after_pick_point_tensor;
-    //                torch::load(after_pick_point_tensor, filename_after_pick_point_tensor.toStdString());
+                //                QString filename_after_pick_point_tensor = QString(filename_id + "/after_pick_point_tensor.pt");
+                //                torch::Tensor after_pick_point_tensor;
+                //                torch::load(after_pick_point_tensor, filename_after_pick_point_tensor.toStdString());
 
-                    // Load string(.txt)
-    //                QString filename_before_state = QString(filename_id + "/before_state.txt");
-    //                std::vector<float> before_state_vector;
-    //                loaddata(filename_before_state.toStdString(), before_state_vector);
-    //                torch::Tensor before_state_tensor = torch::from_blob(before_state_vector.data(), { 262147 }, torch::kFloat);
+                // Load string(.txt)
+                //                QString filename_before_state = QString(filename_id + "/before_state.txt");
+                //                std::vector<float> before_state_vector;
+                //                loaddata(filename_before_state.toStdString(), before_state_vector);
+                //                torch::Tensor before_state_tensor = torch::from_blob(before_state_vector.data(), { 262147 }, torch::kFloat);
 
-    //                QString filename_place_point = QString(filename_id + "/place_point.txt");
-    //                std::vector<float> place_point_vector;
-    //                loaddata(filename_place_point.toStdString(), place_point_vector);
-    //                torch::Tensor place_point_tensor = torch::from_blob(place_point_vector.data(), { 3 }, torch::kFloat);
+                //                QString filename_place_point = QString(filename_id + "/place_point.txt");
+                //                std::vector<float> place_point_vector;
+                //                loaddata(filename_place_point.toStdString(), place_point_vector);
+                //                torch::Tensor place_point_tensor = torch::from_blob(place_point_vector.data(), { 3 }, torch::kFloat);
 
-    //                QString filename_reward = QString(filename_id + "/reward.txt");
-    //                std::vector<float> reward_vector;
-    //                loaddata(filename_reward.toStdString(), reward_vector);
-    //                torch::Tensor reward_tensor = torch::from_blob(reward_vector.data(), { 1 }, torch::kFloat);
+                //                QString filename_reward = QString(filename_id + "/reward.txt");
+                //                std::vector<float> reward_vector;
+                //                loaddata(filename_reward.toStdString(), reward_vector);
+                //                torch::Tensor reward_tensor = torch::from_blob(reward_vector.data(), { 1 }, torch::kFloat);
 
-    //                QString filename_done = QString(filename_id + "/done.txt");
-    //                std::vector<float> done_vector;
-    //                loaddata(filename_done.toStdString(), done_vector);
-    //                torch::Tensor done_tensor = torch::from_blob(done_vector.data(), { 1 }, torch::kFloat);
+                //                QString filename_done = QString(filename_id + "/done.txt");
+                //                std::vector<float> done_vector;
+                //                loaddata(filename_done.toStdString(), done_vector);
+                //                torch::Tensor done_tensor = torch::from_blob(done_vector.data(), { 1 }, torch::kFloat);
 
-    //                QString filename_after_state = QString(filename_id + "/after_state.txt");
-    //                std::vector<float> after_state_vector;
-    //                loaddata(filename_after_state.toStdString(), after_state_vector);
-    //                torch::Tensor after_state_tensor = torch::from_blob(after_state_vector.data(), { 262147 }, torch::kFloat);
+                //                QString filename_after_state = QString(filename_id + "/after_state.txt");
+                //                std::vector<float> after_state_vector;
+                //                loaddata(filename_after_state.toStdString(), after_state_vector);
+                //                torch::Tensor after_state_tensor = torch::from_blob(after_state_vector.data(), { 262147 }, torch::kFloat);
 
-    //                // Trans to tensor and save
-    //                QString sfilename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
-    //                torch::save(before_state_tensor, sfilename_before_state_tensor.toStdString());
+                //                // Trans to tensor and save
+                //                QString sfilename_before_state_tensor = QString(filename_id + "/before_state_tensor.pt");
+                //                torch::save(before_state_tensor, sfilename_before_state_tensor.toStdString());
 
-    //                QString sfilename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
-    //                torch::save(place_point_tensor, sfilename_place_point_tensor.toStdString());
+                //                QString sfilename_place_point_tensor = QString(filename_id + "/place_point_tensor.pt");
+                //                torch::save(place_point_tensor, sfilename_place_point_tensor.toStdString());
 
-    //                QString sfilename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
-    //                torch::save(reward_tensor, sfilename_reward_tensor.toStdString());
+                //                QString sfilename_reward_tensor = QString(filename_id + "/reward_tensor.pt");
+                //                torch::save(reward_tensor, sfilename_reward_tensor.toStdString());
 
-    //                QString sfilename_done_tensor = QString(filename_id + "/done_tensor.pt");
-    //                torch::save(done_tensor, sfilename_done_tensor.toStdString());
+                //                QString sfilename_done_tensor = QString(filename_id + "/done_tensor.pt");
+                //                torch::save(done_tensor, sfilename_done_tensor.toStdString());
 
-    //                QString sfilename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
-    //                torch::save(after_state_tensor, sfilename_after_state_tensor.toStdString());
+                //                QString sfilename_after_state_tensor = QString(filename_id + "/after_state_tensor.pt");
+                //                torch::save(after_state_tensor, sfilename_after_state_tensor.toStdString());
 
-    //                memory.push_back({before_state_tensor.clone().detach(),
-    //                                  before_pick_point_tensor.clone().detach(),
-    //                                  place_point_tensor.clone().detach(),
-    //                                  reward_tensor.clone().detach(),
-    //                                  done_tensor.clone().detach(),
-    //                                  after_state_tensor.clone().detach(),
-    //                                  after_pick_point_tensor.clone().detach()});
+                //                memory.push_back({before_state_tensor.clone().detach(),
+                //                                  before_pick_point_tensor.clone().detach(),
+                //                                  place_point_tensor.clone().detach(),
+                //                                  reward_tensor.clone().detach(),
+                //                                  done_tensor.clone().detach(),
+                //                                  after_state_tensor.clone().detach(),
+                //                                  after_pick_point_tensor.clone().detach()});
 
-    //                std::cout << "before lowest: " << memory[i].before_state.min() << std::endl;
-    //                std::cout << "before highest: " << memory[i].before_state.max() << std::endl;
-    //                std::cout << "place_point: " << memory[i].place_point << std::endl;
-    //                std::cout << "reward: " << memory[i].reward << std::endl;
-    //                std::cout << "done: " << memory[i].done << std::endl;
-    //                std::cout << "after lowest: " << memory[i].after_state.min() << std::endl;
-    //                std::cout << "after highest: " << memory[i].after_state.max() << std::endl;
-    //            }
+                //                std::cout << "before lowest: " << memory[i].before_state.min() << std::endl;
+                //                std::cout << "before highest: " << memory[i].before_state.max() << std::endl;
+                //                std::cout << "place_point: " << memory[i].place_point << std::endl;
+                //                std::cout << "reward: " << memory[i].reward << std::endl;
+                //                std::cout << "done: " << memory[i].done << std::endl;
+                //                std::cout << "after lowest: " << memory[i].after_state.min() << std::endl;
+                //                std::cout << "after highest: " << memory[i].after_state.max() << std::endl;
+                //            }
             }
 
             if(!RestoreFromCheckpoint){
@@ -7981,7 +8172,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                 garment_unfolded = false;
                 cv::Mat before_image, after_image;
 
-                while (step < maxstep && mRunReinforcementLearning1) {
+                while (step < maxstep && mRunReinforcementLearning2) {
                     //std::cout << "p fc3: \n" << policy->fc3->parameters() << std::endl;
                     //std::cout << "p fc4: \n" << policy->fc4->parameters() << std::endl;
                     qDebug() << "--------------------------------------------";
@@ -7992,11 +8183,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                         qDebug() << "\033[0;34mTesting model : Step [" << step+1 << "/" << teststep << "] started\033[0m";
                     } else {
                         qDebug() << "\033[0;34mEpisode " << episode+1 << ": Step [" << step+1 << "/" << maxstep << "] started\033[0m";
-    //                    if(done_old_data){
-    //                        qDebug() << "\033[0;34mTotal steps: " << total_steps << "\033[0m";
-    //                    } else {
-    //                        qDebug() << "\033[0;34mTotal steps / Old data size: [" << total_steps << "/" << datasize << "]\033[0m";
-    //                    }
+                        //                    if(done_old_data){
+                        //                        qDebug() << "\033[0;34mTotal steps: " << total_steps << "\033[0m";
+                        //                    } else {
+                        //                        qDebug() << "\033[0;34mTotal steps / Old data size: [" << total_steps << "/" << datasize << "]\033[0m";
+                        //                    }
 
                         qDebug() << "\033[0;34mTotal steps: " << total_steps+1;
                         qDebug() << "Unfolded step: ";
@@ -8058,50 +8249,50 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                         Rz = 0;
 
                         if (file.open(QIODevice::ReadWrite)) {
-                           file.setPermissions(QFileDevice::Permissions(1909));
-                           QTextStream stream(&file);
-                           stream << "#!/bin/bash" << "\n"
-                                  << "\n"
-                                  << "cd" << "\n"
-                                  << "\n"
-                                  << "source /opt/ros/foxy/setup.bash" << "\n"
-                                  << "\n"
-                                  << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                                  << "\n"
-                                  << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                                  << "\n"
-                                  << "cd tm_robot_gripper/" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-                //                  << "\n"
-                //                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 2" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-                //                  << "\n"
-                //                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-                //                  << "\n"
-                //                  << "sleep 1" << "\n"
-                                  << "\n"
-                                  << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                  << "\n"
-                                  << "sleep 2" << "\n"
-                                  << "\n";
+                            file.setPermissions(QFileDevice::Permissions(1909));
+                            QTextStream stream(&file);
+                            stream << "#!/bin/bash" << "\n"
+                                   << "\n"
+                                   << "cd" << "\n"
+                                   << "\n"
+                                   << "source /opt/ros/foxy/setup.bash" << "\n"
+                                   << "\n"
+                                   << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                                   << "\n"
+                                   << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                                   << "\n"
+                                   << "cd tm_robot_gripper/" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                                      //                  << "\n"
+                                      //                  << "sleep 1" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                   << "\n"
+                                   << "sleep 2" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << graspr[0] <<", " << graspr[1] <<", " << graspr[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                   << "\n"
+                                   << "sleep 1" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                                      //                  << "\n"
+                                      //                  << "sleep 1" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                   << "\n"
+                                   << "sleep 1" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                                      //                  << "\n"
+                                      //                  << "sleep 1" << "\n"
+                                   << "\n"
+                                   << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                   << "\n"
+                                   << "sleep 2" << "\n"
+                                   << "\n";
                         } else {
-                           qDebug("file open error");
+                            qDebug("file open error");
                         }
                         file.close();
 
@@ -8137,7 +8328,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             total_steps--;
 
                             if (!resetRobotPosition()){
-                                mRunReinforcementLearning1 = false;
+                                mRunReinforcementLearning2 = false;
                                 qDebug() << "\033[1;31mCan not reset Rviz, end training.\033[0m";
                                 break;
                             }
@@ -8151,11 +8342,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                         Sleeper::sleep(3);
 
                         // Rreset Environment
-//                        bool end_training = false;
-//                        Env_reset(Rz, bResetRobot, datasize, end_training);
-//                        if(end_training){
-//                            break;
-//                        }
+                        //                        bool end_training = false;
+                        //                        Env_reset(Rz, bResetRobot, datasize, end_training);
+                        //                        if(end_training){
+                        //                            break;
+                        //                        }
                     }
 
                     if(done_old_data){
@@ -8191,7 +8382,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             src_tensor = src_tensor.permute({ 2, 0, 1 });
                             src_tensor = src_tensor.unsqueeze(0).to(torch::kF32)/255;
 
-    //                        src_tensor = torch::randn({3, 256, 256});
+                            //                        src_tensor = torch::randn({3, 256, 256});
 
                             // Find contours
 
@@ -8252,58 +8443,58 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                                 }
                             }
 
-//                            auto maxm = *std::max_element(avgHeight.begin(), avgHeight.end());
-//                            auto minm = *std::min_element(avgHeight.begin(), avgHeight.end());
-//                            auto max = *std::max_element(src_tableheight.begin(), src_tableheight.end());
-//                            auto min = *std::min_element(src_tableheight.begin(), src_tableheight.end());
-//                            std::cout<<"Max value: "<<max<< std::endl << "min: " << min << '\n';
-//                            std::cout<<"Max value m: "<<maxm<< std::endl << "min m: " << minm << '\n';
+                            //                            auto maxm = *std::max_element(avgHeight.begin(), avgHeight.end());
+                            //                            auto minm = *std::min_element(avgHeight.begin(), avgHeight.end());
+                            //                            auto max = *std::max_element(src_tableheight.begin(), src_tableheight.end());
+                            //                            auto min = *std::min_element(src_tableheight.begin(), src_tableheight.end());
+                            //                            std::cout<<"Max value: "<<max<< std::endl << "min: " << min << '\n';
+                            //                            std::cout<<"Max value m: "<<maxm<< std::endl << "min m: " << minm << '\n';
 
                             src_height_tensor = torch::from_blob(src_tableheight.data(), { 1, warped_image.rows, warped_image.cols }, at::kFloat);
                             src_height_tensor = src_height_tensor.to(torch::kF32);
 
-//                            auto min1 = src_height_tensor.min().item().toFloat();
-//                            auto max1 = src_height_tensor.max().item().toFloat();
-//                            std::cout << "out_tensor1: " << src_height_tensor.sizes() << std::endl << min1 << " " << max1 << std::endl;
-//                            src_height_tensor = src_height_tensor.squeeze();
-//                            cv::Mat cv_mat1(512, 512, CV_32FC1, src_height_tensor.data_ptr());
-//                            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(0.005-min1));
+                            //                            auto min1 = src_height_tensor.min().item().toFloat();
+                            //                            auto max1 = src_height_tensor.max().item().toFloat();
+                            //                            std::cout << "out_tensor1: " << src_height_tensor.sizes() << std::endl << min1 << " " << max1 << std::endl;
+                            //                            src_height_tensor = src_height_tensor.squeeze();
+                            //                            cv::Mat cv_mat1(512, 512, CV_32FC1, src_height_tensor.data_ptr());
+                            //                            cv_mat1.convertTo(cv_mat1, CV_8U, 255.0/(0.005-min1));
 
-//                            gLock.lockForWrite();
-//                            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_Grayscale8).copy();
-//                            gLock.unlock();
-//                            emit glUpdateRequest();
+                            //                            gLock.lockForWrite();
+                            //                            gWarpedImage = QImage((uchar*) cv_mat1.data, cv_mat1.cols, cv_mat1.rows, cv_mat1.step, QImage::Format_Grayscale8).copy();
+                            //                            gLock.unlock();
+                            //                            emit glUpdateRequest();
 
-//                            return 0;
+                            //                            return 0;
 
-    //                        src_height_tensor = torch::randn({256, 256});
+                            //                        src_height_tensor = torch::randn({256, 256});
 
 
-//                            float angle = 0;
-//                            cv::Mat rotatedImg;
-//                            QImage rotatedImgqt;
-//                            for(int a = 0; a < 36; a++){
-//                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+                            //                            float angle = 0;
+                            //                            cv::Mat rotatedImg;
+                            //                            QImage rotatedImgqt;
+                            //                            for(int a = 0; a < 36; a++){
+                            //                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
 
-//                                QMatrix r;
+                            //                                QMatrix r;
 
-//                                r.rotate(angle*10.0);
+                            //                                r.rotate(angle*10.0);
 
-//                                rotatedImgqt = rotatedImgqt.transformed(r);
+                            //                                rotatedImgqt = rotatedImgqt.transformed(r);
 
-//                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+                            //                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
 
-//                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+                            //                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
 
-//                                if(test_result.size()>0){
-//                                    for(auto i=0; i<test_result.size(); i++){
-//                                        if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
-//                                            conf_before = test_result[i].prob;
-//                                        }
-//                                    }
-//                                }
-//                                angle+=1;
-//                            }
+                            //                                if(test_result.size()>0){
+                            //                                    for(auto i=0; i<test_result.size(); i++){
+                            //                                        if(test_result[i].obj_id == 1 && conf_before < test_result[i].prob && test_result[i].prob > 0.5){
+                            //                                            conf_before = test_result[i].prob;
+                            //                                        }
+                            //                                    }
+                            //                                }
+                            //                                angle+=1;
+                            //                            }
 
                             findgrasp(grasp, grasp_point, Rz, hierarchy);
                             auto graspdis = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.1)*(grasp[2]+0.1));
@@ -8317,13 +8508,13 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
 
                                 // Find the location of grasp and release point
                                 const double invImageW = 1.0 / imageWidth,
-                                             invImageH = 1.0 / imageHeight;
+                                        invImageH = 1.0 / imageHeight;
 
                                 cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                  release_point.y*invImageH*warped_image_size.height);
+                                                                   release_point.y*invImageH*warped_image_size.height);
                                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                 float depth_pointr[2] = {0},
-                                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                 rs2_project_color_pixel_to_depth_pixel(depth_pointr, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointr);
                                 int P = int(depth_pointr[0])*depthh + depthh-int(depth_pointr[1]);
                                 cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
@@ -8337,11 +8528,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
 
                                 height = 0.01 * QRandomGenerator::global()->bounded(5,20);
                                 auto distance1 = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05)),
-                                     distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
+                                        distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
                                 while ( distance1 > robotDLimit
-                                      || distance2 > robotDLimit){
-        //                            qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
-        //                                        .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
+                                        || distance2 > robotDLimit){
+                                    //                            qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
+                                    //                                        .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
 
                                     gLock.lockForWrite();
                                     gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
@@ -8349,24 +8540,24 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                                     emit glUpdateRequest();
 
                                     if(   sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit
-                                       || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                          || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
 
-        //                                if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-        //                                    qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-        //                                }
-        //                                if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-        //                                    qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-        //                                }
-        //                                qDebug() << "Recalculate grasp and release point";
+                                        //                                if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                    qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                                }
+                                        //                                if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                    qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                                }
+                                        //                                qDebug() << "Recalculate grasp and release point";
 
                                         findgrasp(grasp, grasp_point, Rz, hierarchy);
                                         findrelease(release, release_point, grasp_point);
 
                                         cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                          release_point.y*invImageH*warped_image_size.height);
+                                                                           release_point.y*invImageH*warped_image_size.height);
                                         cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                         float depth_pointr[2] = {0},
-                                              color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                                color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                         rs2::frame depth;
                                         if(use_filter){
                                             depth = filtered_frame;
@@ -8399,11 +8590,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             src_height_tensor = src_height_tensor.flatten();
                             before_state = torch::cat({ src_tensor, src_height_tensor});
                             before_state = before_state.reshape({4, warped_image_resize.width, warped_image_resize.height});
-    //                        }
-    //                        torch::Tensor pick_point_tensor = torch::randn({3});
-    //                        auto src_tensor_flatten = torch::flatten(src_tensor);
-    //                        auto src_height_tensor_flatten = torch::flatten(src_height_tensor);
-    //                        before_state = torch::cat({ src_tensor_flatten, src_height_tensor_flatten, pick_point_tensor });
+                            //                        }
+                            //                        torch::Tensor pick_point_tensor = torch::randn({3});
+                            //                        auto src_tensor_flatten = torch::flatten(src_tensor);
+                            //                        auto src_height_tensor_flatten = torch::flatten(src_height_tensor);
+                            //                        before_state = torch::cat({ src_tensor_flatten, src_height_tensor_flatten, pick_point_tensor });
                         } else {
                             before_image = after_image_last;
                             before_state = after_state_last.clone().detach();
@@ -8456,7 +8647,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             qDebug() << "\033[1;33mStart exploration\033[0m";
                             place_point[0] = release_point.x/static_cast<float>(imageWidth); place_point[1] = release_point.y/static_cast<float>(imageHeight); place_point[2] = release[2]-gripper_length;
                             place_point_tensor = torch::from_blob(place_point.data(), { 3 }, at::kFloat);
-    //                        place_point_tensor = torch::randn({3});
+                            //                        place_point_tensor = torch::randn({3});
                             //std::cout << "place_point_tensor: " << place_point_tensor << std::endl;
                         } else {
                             qDebug() << "\033[1;33mStart exploitation\033[0m";
@@ -8475,10 +8666,10 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             release_point.x = place_point[0]*static_cast<float>(imageWidth); release_point.y = place_point[1]*static_cast<float>(imageHeight);
 
                             cv::Point2f warpedpr = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width,
-                                                              release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+                                                               release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
                             cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                             float depth_pointr[2] = {0},
-                                  color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                    color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                             rs2::frame depth;
                             if(use_filter){
                                 depth = filtered_frame;
@@ -8502,10 +8693,10 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             qDebug() << "distance1: " << distance1 << "distance2: " << distance2;
                             //qDebug() << "place_point: " << place_point[0] << " " << place_point[1] << " " << place_point[2];
                             if(distance1 >= robotDLimit || distance2 >= robotDLimit
-                               || place_point[2] < 0.05 || place_point[2] > 0.25
-                               || (place_point[0] > 0.6 && place_point[1] > 0.6)
-                               || place_point[0] < 0.1 || place_point[0] > 0.9
-                               || place_point[1] < 0.1 || place_point[1] > 0.9){
+                                    || place_point[2] < 0.05 || place_point[2] > 0.25
+                                    || (place_point[0] > 0.6 && place_point[1] > 0.6)
+                                    || place_point[0] < 0.1 || place_point[0] > 0.9
+                                    || place_point[1] < 0.1 || place_point[1] > 0.9){
                                 qDebug() << "\033[1;31m";
                                 if(distance1 >= robotDLimit){
                                     qDebug() << "Error: distance1 >= robotDLimit";
@@ -8577,58 +8768,58 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             Rz = 0;
 
                             if (file.open(QIODevice::ReadWrite)) {
-                               file.setPermissions(QFileDevice::Permissions(1909));
-                               QTextStream stream(&file);
-                               stream << "#!/bin/bash" << "\n"
-                                      << "\n"
-                                      << "cd" << "\n"
-                                      << "\n"
-                                      << "source /opt/ros/foxy/setup.bash" << "\n"
-                                      << "\n"
-                                      << "source ~/ws_moveit2/install/setup.bash" << "\n"
-                                      << "\n"
-                                      << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
-                                      << "\n"
-                                      << "cd tm_robot_gripper/" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                                      << "sleep 2" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                    //                << "sleep 1" << "\n"
-                    //                << "\n"
-                                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                                      << "sleep 2" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
-                    //                << "\n"
-                    //                << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                    //                  << "\n"
-                    //                  << "sleep 1" << "\n"
-                                      << "\n"
-                                      << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
-                                      << "\n"
-                                      << "sleep 2" << "\n"
-                                      << "\n";
+                                file.setPermissions(QFileDevice::Permissions(1909));
+                                QTextStream stream(&file);
+                                stream << "#!/bin/bash" << "\n"
+                                       << "\n"
+                                       << "cd" << "\n"
+                                       << "\n"
+                                       << "source /opt/ros/foxy/setup.bash" << "\n"
+                                       << "\n"
+                                       << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                                       << "\n"
+                                       << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                                       << "\n"
+                                       << "cd tm_robot_gripper/" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                       << "sleep 2" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                          //                << "sleep 1" << "\n"
+                                          //                << "\n"
+                                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                       << "sleep 2" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                                          //                << "\n"
+                                          //                << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                          //                  << "\n"
+                                          //                  << "sleep 1" << "\n"
+                                       << "\n"
+                                       << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                                       << "\n"
+                                       << "sleep 2" << "\n"
+                                       << "\n";
                             } else {
-                               qDebug("file open error");
+                                qDebug("file open error");
                             }
                             file.close();
 
@@ -8664,7 +8855,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                                 total_steps--;
 
                                 if (!resetRobotPosition()){
-                                    mRunReinforcementLearning1 = false;
+                                    mRunReinforcementLearning2 = false;
                                     qDebug() << "\033[1;31mCan not reset Rviz, end training.\033[0m";
                                     break;
                                 }
@@ -8694,7 +8885,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             after_image_tensor = after_image_tensor.permute({ 2, 0, 1 });
                             after_image_tensor = after_image_tensor.unsqueeze(0).to(torch::kF32)/255;
 
-    //                      torch::Tensor after_image_tensor = torch::randn({3, 256, 256});
+                            //                      torch::Tensor after_image_tensor = torch::randn({3, 256, 256});
 
                             mCalAveragePoint = true;
                             mCalAvgMat = true;
@@ -8741,34 +8932,34 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             after_height_tensor = torch::from_blob(after_tableheight.data(), { 1, warped_image.rows, warped_image.cols }, at::kFloat);
                             after_height_tensor = after_height_tensor.to(torch::kF32);
 
-    //                      after_height_tensor = torch::randn({256, 256});
+                            //                      after_height_tensor = torch::randn({256, 256});
 
-//                            float angle = 0;
-//                            cv::Mat rotatedImg;
-//                            QImage rotatedImgqt;
-//                            for(int a = 0; a < 36; a++){
-//                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
+                            //                            float angle = 0;
+                            //                            cv::Mat rotatedImg;
+                            //                            QImage rotatedImgqt;
+                            //                            for(int a = 0; a < 36; a++){
+                            //                                rotatedImgqt = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888);
 
-//                                QMatrix r;
+                            //                                QMatrix r;
 
-//                                r.rotate(angle*10.0);
+                            //                                r.rotate(angle*10.0);
 
-//                                rotatedImgqt = rotatedImgqt.transformed(r);
+                            //                                rotatedImgqt = rotatedImgqt.transformed(r);
 
-//                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
+                            //                                rotatedImg = cv::Mat(rotatedImgqt.height(), rotatedImgqt.width(), CV_8UC3, rotatedImgqt.bits());
 
-//                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
+                            //                                std::vector<bbox_t> test_result = mDetector->detect(rotatedImg);
 
-//                                if(test_result.size()>0){
-//                                    for(auto i =0; i<test_result.size(); i++){
-//                                        if(test_result[i].obj_id == 1 && conf_after < test_result[i].prob && test_result[i].prob > 0.5){
-//                                            conf_after = test_result[i].prob;
-//                                        }
-//                                    }
-//                                }
-//                                angle+=1;
-//                            }
-//                            qDebug() << "\033[1;32mClasscification confidence level after action: \033[0m" << conf_after;
+                            //                                if(test_result.size()>0){
+                            //                                    for(auto i =0; i<test_result.size(); i++){
+                            //                                        if(test_result[i].obj_id == 1 && conf_after < test_result[i].prob && test_result[i].prob > 0.5){
+                            //                                            conf_after = test_result[i].prob;
+                            //                                        }
+                            //                                    }
+                            //                                }
+                            //                                angle+=1;
+                            //                            }
+                            //                            qDebug() << "\033[1;32mClasscification confidence level after action: \033[0m" << conf_after;
 
                             // Get after state
 
@@ -8798,13 +8989,13 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
 
                                 // Find the location of grasp and release point
                                 const double invImageW = 1.0 / imageWidth,
-                                             invImageH = 1.0 / imageHeight;
+                                        invImageH = 1.0 / imageHeight;
 
                                 cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                  release_point.y*invImageH*warped_image_size.height);
+                                                                   release_point.y*invImageH*warped_image_size.height);
                                 cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                 float depth_pointr[2] = {0},
-                                      color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                        color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                 rs2_project_color_pixel_to_depth_pixel(depth_pointr, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointr);
                                 int P = int(depth_pointr[0])*depthh + depthh-int(depth_pointr[1]);
                                 cv::Point3f Pc = {mPointCloud[P].x(), -mPointCloud[P].y(), -mPointCloud[P].z()};
@@ -8818,11 +9009,11 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
 
                                 height = 0.01 * QRandomGenerator::global()->bounded(5,20);
                                 auto distance1 = sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05)),
-                                     distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
+                                        distance2 = sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+height+0.05)*(grasp[2]+height+0.05));
                                 while ( distance1 > robotDLimit
-                                      || distance2 > robotDLimit){
-            //                        qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
-            //                                    .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
+                                        || distance2 > robotDLimit){
+                                    //                        qDebug() << QString("\033[1;31m[Warning] Robot can't reach (<%4): d1=%1, d2=%2, h=%3\033[0m")
+                                    //                                    .arg(distance1,0,'f',3).arg(distance2,0,'f',3).arg(height,0,'f',3).arg(robotDLimit,0,'f',3).toUtf8().data();
 
                                     gLock.lockForWrite();
                                     gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
@@ -8830,25 +9021,25 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                                     emit glUpdateRequest();
 
                                     if(   sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit
-                                       || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                          || sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
 
-            //                            if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-            //                                qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-            //                            }
-            //                            if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
-            //                                qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
-            //                            }
+                                        //                            if(sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                qDebug() << "Grasp point exceeds limit, distance: " << sqrt(grasp[0]*grasp[0]+grasp[1]*grasp[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                            }
+                                        //                            if(sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05)) > robotDLimit){
+                                        //                                qDebug() << "Release point exceeds limit, distance: " << sqrt(release[0]*release[0]+release[1]*release[1]+(grasp[2]+0.05+0.05)*(grasp[2]+0.05+0.05));
+                                        //                            }
 
-            //                            qDebug() << "Recalculate grasp and release point";
+                                        //                            qDebug() << "Recalculate grasp and release point";
 
                                         findgrasp(grasp, grasp_point, Rz, hierarchy);
                                         findrelease(release, release_point, grasp_point);
 
                                         cv::Point2f warpedpr = cv::Point2f(release_point.x*invImageW*warped_image_size.width,
-                                                                          release_point.y*invImageH*warped_image_size.height);
+                                                                           release_point.y*invImageH*warped_image_size.height);
                                         cv::Point3f homogeneousr = WarpMatrix.inv() * warpedpr;
                                         float depth_pointr[2] = {0},
-                                              color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
+                                                color_pointr[2] = {homogeneousr.x/homogeneousr.z, homogeneousr.y/homogeneousr.z};
                                         rs2::frame depth;
                                         if(use_filter){
                                             depth = filtered_frame;
@@ -8902,16 +9093,16 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             after_state = torch::cat({ after_image_tensor, after_height_tensor});
                             after_state = after_state.reshape({4, warped_image_resize.width, warped_image_resize.height});
 
-    //                      max_height_before = rand()%200/10.0f;
-    //                      max_height_after = rand()%200/10.0f;
-    //                      garment_area_before = rand()%10000;
-    //                      garment_area_after = rand()%10000;
-    //                      conf_before = 0;
-    //                      conf_after = 0;
-    //                      auto after_image_flatten = torch::flatten(after_image_tensor);
-    //                      auto after_height_tensor_flatten = torch::flatten(after_height_tensor);
-    //                      torch::Tensor pick_point2_tensor = torch::randn({3});
-    //                      auto after_state = torch::cat({ after_image_flatten, after_height_tensor_flatten, pick_point2_tensor });
+                            //                      max_height_before = rand()%200/10.0f;
+                            //                      max_height_after = rand()%200/10.0f;
+                            //                      garment_area_before = rand()%10000;
+                            //                      garment_area_after = rand()%10000;
+                            //                      conf_before = 0;
+                            //                      conf_after = 0;
+                            //                      auto after_image_flatten = torch::flatten(after_image_tensor);
+                            //                      auto after_height_tensor_flatten = torch::flatten(after_height_tensor);
+                            //                      torch::Tensor pick_point2_tensor = torch::randn({3});
+                            //                      auto after_state = torch::cat({ after_image_flatten, after_height_tensor_flatten, pick_point2_tensor });
 
                             float height_reward, garment_area_reward, conf_reward;
                             height_reward = 5000 * (max_height_before - max_height_after);
@@ -8939,12 +9130,12 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             qDebug() << "\033[1;31mGarment is unfolded, end episode\033[0m";
                         }
 
-//                        if (max_height_after < 0.017 && conf_after > 0.7) { // Max height when garment unfolded is about 0.015m, conf level is about 0.75
-//                            done[0] = 1.0;
-//                            stepreward[0] += 5000;
-//                            garment_unfolded = true;
-//                            qDebug() << "\033[1;31mGarment is unfolded, end episode\033[0m";
-//                        }
+                        //                        if (max_height_after < 0.017 && conf_after > 0.7) { // Max height when garment unfolded is about 0.015m, conf level is about 0.75
+                        //                            done[0] = 1.0;
+                        //                            stepreward[0] += 5000;
+                        //                            garment_unfolded = true;
+                        //                            qDebug() << "\033[1;31mGarment is unfolded, end episode\033[0m";
+                        //                        }
 
                         if (exceed_limit){
                             if(test_model){
@@ -9012,7 +9203,7 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                                 total_steps--;
 
                                 if (!resetRobotPosition()){
-                                    mRunReinforcementLearning1 = false;
+                                    mRunReinforcementLearning2 = false;
                                     qDebug() << "\033[1;31mCan not reset Rviz, end training.\033[0m";
                                     break;
                                 }
@@ -9032,10 +9223,10 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                         episode_reward += stepreward[0];
 
                         // Only save data with reward <=-100 and >200
-//                        if (total_steps < START_STEP && stepreward[0] > -100 && stepreward[0] < 200){
-//                            qDebug() << "\033[1;31mReward between -100 to 200, redo.\033[0m";
-//                            continue;
-//                        }
+                        //                        if (total_steps < START_STEP && stepreward[0] > -100 && stepreward[0] < 200){
+                        //                            qDebug() << "\033[1;31mReward between -100 to 200, redo.\033[0m";
+                        //                            continue;
+                        //                        }
 
                         if(test_model){
                             auto future_savedata = QtConcurrent::run([before_image = before_image,
@@ -9111,33 +9302,33 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                             done_tensor = torch::from_blob(done.data(), { 1 }, torch::kFloat);
                             //std::cout << "done_tensor: " << done_tensor << std::endl;
 
-        //                    if (memory.size() >= 10000) {
-        //                        memory.pop_front();
-        //                    }
+                            //                    if (memory.size() >= 10000) {
+                            //                        memory.pop_front();
+                            //                    }
 
-    //                        memory.push_back({
-    //                            before_state.clone().detach(),
-    //                            before_pick_point_tensor.clone().detach(),
-    //                            place_point_tensor.clone().detach(),
-    //                            reward_tensor.clone().detach(),
-    //                            done_tensor.clone().detach(),
-    //                            after_state.clone().detach(),
-    //                            after_pick_point_tensor.clone().detach()
-    //                            });
+                            //                        memory.push_back({
+                            //                            before_state.clone().detach(),
+                            //                            before_pick_point_tensor.clone().detach(),
+                            //                            place_point_tensor.clone().detach(),
+                            //                            reward_tensor.clone().detach(),
+                            //                            done_tensor.clone().detach(),
+                            //                            after_state.clone().detach(),
+                            //                            after_pick_point_tensor.clone().detach()
+                            //                            });
 
-            //                    std::cout << "before_state: " << memory[step].before_state.mean() << std::endl
-            //                              << "place_point_tensor: " << memory[step].place_point_tensor << std::endl
-            //                              << "reward_tensor: " << memory[step].reward_tensor << std::endl
-            //                              << "done_tensor: " << memory[step].done_tensor << std::endl
-            //                              << "after_state: " << memory[step].after_state.mean() << std::endl;
+                            //                    std::cout << "before_state: " << memory[step].before_state.mean() << std::endl
+                            //                              << "place_point_tensor: " << memory[step].place_point_tensor << std::endl
+                            //                              << "reward_tensor: " << memory[step].reward_tensor << std::endl
+                            //                              << "done_tensor: " << memory[step].done_tensor << std::endl
+                            //                              << "after_state: " << memory[step].after_state.mean() << std::endl;
 
-    //                        std::cout << "before_state: " << before_state.sizes() << std::endl;
-    //                        std::cout << "before_pick_point_tensor: " << before_pick_point_tensor.sizes() << std::endl;
-    //                        std::cout << "place_point_tensor: " << place_point_tensor.sizes() << std::endl;
-    //                        std::cout << "reward_tensor: " << reward_tensor.sizes() << std::endl;
-    //                        std::cout << "done_tensor: " << done_tensor.sizes() << std::endl;
-    //                        std::cout << "after_state: " << after_state.sizes() << std::endl;
-    //                        std::cout << "after_pick_point_tensor: " << after_pick_point_tensor.sizes() << std::endl;
+                            //                        std::cout << "before_state: " << before_state.sizes() << std::endl;
+                            //                        std::cout << "before_pick_point_tensor: " << before_pick_point_tensor.sizes() << std::endl;
+                            //                        std::cout << "place_point_tensor: " << place_point_tensor.sizes() << std::endl;
+                            //                        std::cout << "reward_tensor: " << reward_tensor.sizes() << std::endl;
+                            //                        std::cout << "done_tensor: " << done_tensor.sizes() << std::endl;
+                            //                        std::cout << "after_state: " << after_state.sizes() << std::endl;
+                            //                        std::cout << "after_pick_point_tensor: " << after_pick_point_tensor.sizes() << std::endl;
 
                             auto future_savedata = QtConcurrent::run([before_image = before_image,
                                                                      before_state_CPU = before_state.clone().detach(),
@@ -9463,12 +9654,12 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                     episode_policy_loss = episode_policy_loss / (float)train_number;
 
                     qDebug() << "\033[0;35m--------------------------------------------" << "\n"
-                        << "Episode: " << episode << "\n"
-                        << "Reward: " << episode_reward << "\n"
-                        << "Critic 1 Loss: " << episode_critic1_loss << "\n"
-                        << "Critic 2 Loss: " << episode_critic2_loss << "\n"
-                        << "Policy Loss: " << episode_policy_loss << "\n"
-                        << "--------------------------------------------\033[0m";
+                             << "Episode: " << episode << "\n"
+                             << "Reward: " << episode_reward << "\n"
+                             << "Critic 1 Loss: " << episode_critic1_loss << "\n"
+                             << "Critic 2 Loss: " << episode_critic2_loss << "\n"
+                             << "Policy Loss: " << episode_policy_loss << "\n"
+                             << "--------------------------------------------\033[0m";
                     logger.add_scalar("Episode_Reward", episode, episode_reward);
                     logger.add_scalar("Episode_Critic_1_Loss", episode, episode_critic1_loss);
                     logger.add_scalar("Episode_Critic_2_Loss", episode, episode_critic2_loss);
@@ -9514,8 +9705,8 @@ void LP_Plugin_Garment_Manipulation::Reinforcement_Learning_2(){
                     }
                 }
 
-                if(mRunReinforcementLearning1 == false){
-                    qDebug() << "Quit Reinforcement Learning 1" ;
+                if(mRunReinforcementLearning2 == false){
+                    qDebug() << "Quit Reinforcement Learning 2" ;
                     qDebug() << "Saving models";
 
                     QString pi_para_path = QString(modelPath + "/pi_para/pi_para_" + QString::number(episode) + ".pt");
@@ -9618,7 +9809,7 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
                 qDebug() << "TEST MODE: episode " << load_model;
             }
             if(RestoreFromCheckpoint || LoadOldData){
-//                int olddata_size = 0;
+                //                int olddata_size = 0;
 
                 if(LoadOldData){
                     qDebug() << "Load old data";
@@ -9774,11 +9965,11 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
                             qDebug() << "\033[0;34mTesting model : Step [" << step+1 << "/" << teststep << "] started\033[0m";
                         } else {
                             qDebug() << "\033[0;34mEpisode " << episode+1 << ": Step [" << step+1 << "/" << maxstep << "] started\033[0m";
-        //                    if(done_old_data){
-        //                        qDebug() << "\033[0;34mTotal steps: " << total_steps << "\033[0m";
-        //                    } else {
-        //                        qDebug() << "\033[0;34mTotal steps / Old data size: [" << total_steps << "/" << datasize << "]\033[0m";
-        //                    }
+                            //                    if(done_old_data){
+                            //                        qDebug() << "\033[0;34mTotal steps: " << total_steps << "\033[0m";
+                            //                    } else {
+                            //                        qDebug() << "\033[0;34mTotal steps / Old data size: [" << total_steps << "/" << datasize << "]\033[0m";
+                            //                    }
 
                             qDebug() << "\033[0;34mTotal steps: " << total_steps+1;
                             qDebug() << "Episodes that finished task: ";
@@ -9841,7 +10032,7 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
                                     } else {
                                         if(red_angle < blue_angle){
                                             if((0.5*PI<red_angle && red_angle<1.5*PI)
-                                               ||(red_angle<0.5*PI && 1.5*PI<blue_angle && blue_angle<2*PI)){
+                                                    ||(red_angle<0.5*PI && 1.5*PI<blue_angle && blue_angle<2*PI)){
                                                 Push_Rod(0, 0.04, use_clock);
                                                 Push_Rod(3, 0.04, use_clock);
                                             } else if ((1.5*PI<red_angle && red_angle<2*PI && 1.5*PI<blue_angle && blue_angle<2*PI)
@@ -9858,7 +10049,7 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
                                             }
                                         } else {
                                             if((0.5*PI<blue_angle && blue_angle<1.5*PI)
-                                               ||(blue_angle<0.5*PI && 1.5*PI<red_angle && red_angle<2*PI)){
+                                                    ||(blue_angle<0.5*PI && 1.5*PI<red_angle && red_angle<2*PI)){
                                                 Push_Rod(2, 0.04, use_clock);
                                                 Push_Rod(1, 0.04, use_clock);
                                             } else if ((1.5*PI<blue_angle && blue_angle<2*PI && 1.5*PI<red_angle && red_angle<2*PI)
@@ -10371,8 +10562,8 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
 
                                 // MSE loss against Bellman backup
                                 torch::AutoGradMode loss_enable(true);
-//                                torch::Tensor loss_q1 = torch::mean(pow(q1 - backup, 2)); // JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-//                                torch::Tensor loss_q2 = torch::mean(pow(q2 - backup, 2));
+                                //                                torch::Tensor loss_q1 = torch::mean(pow(q1 - backup, 2)); // JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+                                //                                torch::Tensor loss_q2 = torch::mean(pow(q2 - backup, 2));
                                 torch::Tensor loss_q1 = torch::nn::functional::mse_loss(q1, backup);
                                 torch::Tensor loss_q2 = torch::nn::functional::mse_loss(q2, backup);
                                 torch::Tensor loss_q = loss_q1 + loss_q2;
@@ -10491,12 +10682,12 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
                     episode_policy_loss = episode_policy_loss / (float)train_number;
 
                     qDebug() << "\033[0;35m--------------------------------------------" << "\n"
-                        << "Episode: " << episode << "\n"
-                        << "Reward: " << episode_reward << "\n"
-                        << "Critic 1 Loss: " << episode_critic1_loss << "\n"
-                        << "Critic 2 Loss: " << episode_critic2_loss << "\n"
-                        << "Policy Loss: " << episode_policy_loss << "\n"
-                        << "--------------------------------------------\033[0m";
+                             << "Episode: " << episode << "\n"
+                             << "Reward: " << episode_reward << "\n"
+                             << "Critic 1 Loss: " << episode_critic1_loss << "\n"
+                             << "Critic 2 Loss: " << episode_critic2_loss << "\n"
+                             << "Policy Loss: " << episode_policy_loss << "\n"
+                             << "--------------------------------------------\033[0m";
                     logger.add_scalar("Episode_Reward", episode, episode_reward);
                     logger.add_scalar("Episode_Critic_1_Loss", episode, episode_critic1_loss);
                     logger.add_scalar("Episode_Critic_2_Loss", episode, episode_critic2_loss);
@@ -10582,6 +10773,579 @@ void LP_Plugin_Garment_Manipulation::Train_rod(){
     });
 }
 
+void LP_Plugin_Garment_Manipulation::RunLPAP()
+{
+    // From paper -- "Learning to Fold Real Garments with One Arm: A Case Study in Cloud-Based Robotics Research"
+    auto rl1current = QtConcurrent::run([this](){
+        try {
+            std::string mpath = "/home/cpii/Desktop/LPAP/model_flatten-LPAP.pth";
+            std::vector<torch::Tensor> model;
+
+            torch::load(model, mpath);
+            qDebug() << "model size: " << model.size();
+            for(size_t i=0; i < model.size(); i++){
+                std::cout << i << ": \n" << model[i];
+            }
+
+        } catch (const std::exception &e) {
+            auto &&msg = torch::GetExceptionString(e);
+            qWarning() << msg.c_str();
+        } catch (...) {
+            qCritical() << "GG";
+        }
+    });
+}
+
+void LP_Plugin_Garment_Manipulation::RunTEXTILES()
+{
+    // From paper -- "Improving and evaluating robotic garment unfolding: A garment-agnostic approach"
+    auto rl1current = QtConcurrent::run([this](){
+        try {
+            QString tmp_path = QString("/home/cpii/Desktop/Textiles/tmp/");
+            rs2::frame depth;
+            if(use_filter){
+                depth = filtered_frame;
+            } else {
+                depth = frames.get_depth_frame();
+            }
+            bool drop_done = false, done = false;
+            float Rz = 0.0;
+            cv::Mat inv_warp_image, Src, color_image;
+            cv::Mat segmentation_drawing, clustering_drawing, pick_and_place_drawing;
+            cv::Point grasp_point, release_point;
+            std::vector<double> grasp(3), release(3);
+            std::vector<float> depth_map(warped_image.cols * warped_image.rows);
+
+            gEdgeImage = gNullImage;
+            gWarpedImage = gNullImage;
+            gInvWarpImage = gNullImage;
+            gDetectImage = gNullImage;
+            while(!done){
+                // Get color image
+                gCamimage.copyTo(Src);
+                cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+                cv::resize(warped_image, inv_warp_image, warped_image_size);
+                cv::warpPerspective(inv_warp_image, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
+                cv::resize(warped_image, warped_image, warped_image_resize);
+                warped_image = background - warped_image;
+                warped_image = ~warped_image;
+
+                color_image = warped_image;
+
+                // Drop phase
+                if(!drop_done){
+                    cv::Mat src_gray;
+                    cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
+                    cv::blur( src_gray, src_gray, cv::Size(3,3) );
+
+                    cv::Mat canny_output;
+                    cv::Canny( src_gray, canny_output, thresh, thresh*1.2 );
+                    std::vector<cv::Vec4i> hierarchyr;
+                    cv::Size sz = src_gray.size();
+                    imageWidth = sz.width;
+                    imageHeight = sz.height;
+
+                    cv::findContours( canny_output, contours, hierarchyr, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
+                    drawing = cv::Mat::zeros( canny_output.size(), CV_8UC3 );
+
+                    findgrasp(grasp, grasp_point, Rz, hierarchyr);
+                    cv::circle( drawing,
+                                grasp_point,
+                                12,
+                                cv::Scalar( 0, 255, 255 ),
+                                3,
+                                cv::LINE_AA );
+
+                    gLock.lockForWrite();
+                    gWarpedImage = QImage((uchar*) warped_image.data, warped_image.cols, warped_image.rows, warped_image.step, QImage::Format_BGR888).copy();
+                    gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
+                    gEdgeImage = QImage((uchar*) drawing.data, drawing.cols, drawing.rows, drawing.step, QImage::Format_BGR888).copy();
+                    gLock.unlock();
+                    emit glUpdateRequest();
+
+                    // Write the plan file
+                    QString filenamed = "/home/cpii/projects/scripts/move.sh";
+                    QFile filed(filenamed);
+
+                    if (filed.open(QIODevice::ReadWrite)) {
+                        filed.setPermissions(QFileDevice::Permissions(1909));
+                        QTextStream stream(&filed);
+                        stream << "#!/bin/bash" << "\n"
+                               << "\n"
+                               << "cd" << "\n"
+                               << "\n"
+                               << "source /opt/ros/foxy/setup.bash" << "\n"
+                               << "\n"
+                               << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                               << "\n"
+                               << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                               << "\n"
+                               << "cd tm_robot_gripper/" << "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                               << "\n"
+                               << "sleep 2" << "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                               << "\n"
+                               << "sleep 1" << "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                               << "\n"
+                               << "sleep 1" << "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [-0.5, 0, 0.7, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                               << "\n"
+                               << "sleep 1" << "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                               << "\n"
+                               << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 1.5, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                               << "\n"
+                               << "sleep 2" << "\n"
+                               << "\n";
+                    } else {
+                        qDebug("file open error");
+                    }
+                    filed.close();
+
+                    QProcess plan;
+                    QStringList planarg;
+
+                    planarg << "/home/cpii/projects/scripts/move.sh";
+                    plan.start("xterm", planarg);
+
+                    constexpr int timeout_count = 60000; //60000 mseconds
+                    if ( plan.waitForFinished(timeout_count)) {
+                        qDebug() << QString("\033[1;36m[%1] drop finished\033[0m")
+                                    .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
+                                    .toUtf8().data();
+                    }
+                    Sleeper::sleep(3);
+
+                    // Cal area
+                    gCamimage.copyTo(Src);
+                    cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+                    cv::resize(warped_image, inv_warp_image, warped_image_size);
+                    cv::warpPerspective(inv_warp_image, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
+                    cv::resize(warped_image, warped_image, warped_image_resize);
+                    warped_image = background - warped_image;
+                    warped_image = ~warped_image;
+                    cv::Mat image_hsv, image_blur;
+                    cv::cvtColor(warped_image, image_hsv, cv::COLOR_BGR2HSV);
+                    cv::GaussianBlur(image_hsv, image_blur, cv::Size(5, 5), 0);
+
+                    // define range of white color in HSV
+                    // change it according to your need !
+                    const int sensitivity = 20;
+                    cv::Scalar lower_white = cv::Scalar(0, 0, 255-sensitivity);
+                    cv::Scalar upper_white = cv::Scalar(255, sensitivity, 255);
+
+                    // Threshold the HSV image to get only white colors
+                    cv::Mat mask;
+                    cv::inRange(image_blur, lower_white, upper_white, mask);
+
+                    // Filter result using morphological operations (closing)
+                    cv::Mat filtered_mask_close;
+                    cv::Mat filtered_mask_open;
+                    cv::Mat kernel = cv::Mat::ones(5, 5, CV_8UC1);
+                    cv::morphologyEx(mask, filtered_mask_close, cv::MORPH_CLOSE, kernel, cv::Point(-1, -1), 5);
+                    cv::morphologyEx(filtered_mask_close, filtered_mask_open, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 8);
+
+                    cv::Mat threshold_mask;
+                    cv::threshold(filtered_mask_open, threshold_mask, 0, 255, cv::THRESH_BINARY_INV);
+
+                    int garment_area_before = 0;
+                    for(int row=0; row<threshold_mask.rows; row++){
+                        for(int col=0; col<threshold_mask.cols; col++){
+                            if(threshold_mask.at<uchar>(col, row) == 255){
+                                garment_area_before++;
+                            }
+                        }
+                    }
+                    //qDebug() << float(garment_area_before)/(threshold_mask.rows * threshold_mask.cols);
+                    if(float(garment_area_before)/(threshold_mask.rows * threshold_mask.cols) < 0.05){
+                        qDebug() << "Repeat drop phase";
+                        continue;
+                    } else {
+                        drop_done = true;
+                        qDebug() << "Drop phase done!";
+                        gEdgeImage = gNullImage;
+                        gWarpedImage = gNullImage;
+                        gInvWarpImage = gNullImage;
+                        gDetectImage = gNullImage;
+                    }
+                }
+
+                // Get depth map
+                mCalAveragePoint = true;
+                mCalAvgMat = true;
+                avgHeight.clear();
+                acount = 0;
+                while (acount<30){
+                    Sleeper::msleep(200);
+                }
+                mCalAvgMat = false;
+                mCalAveragePoint = false;
+
+                for(int i=0; i<warped_image.rows; i++){
+                    for(int j=0; j<warped_image.cols; j++){
+                        auto PT_RGB = warped_image.at<cv::Vec3b>(i, j);
+                        int id = i*warped_image.cols+j;
+                        if((i >= (0.6*(float)warped_image.rows) && j >= (0.6*(float)warped_image.cols))
+                                || (PT_RGB[0] >= uThres && PT_RGB[1] >= uThres && PT_RGB[2] >= uThres)){
+                            depth_map[id] = 1.0;
+                        } else {
+                            cv::Point2f warpedp = cv::Point2f(j/static_cast<float>(imageWidth)*warped_image_size.width, i/static_cast<float>(imageHeight)*warped_image_size.height);
+                            cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+                            float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+                            rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+                            int P = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
+                            if(avgHeight.at(P) > 0.0 && avgHeight.at(P) < 0.20){
+                                depth_map[id] = 1.0 - (float)avgHeight.at(P);
+                            } else {
+                                depth_map[id] = 1.0;
+                            }
+                        }
+                    }
+                }
+
+                // Python version of Textiles
+
+                // Save depth map and color image
+                QString depth_map_path = QString(tmp_path + "depth_map.txt");
+                QString filename_img = QString(tmp_path + "image.jpg");
+                QByteArray filename_imgqb = filename_img.toLocal8Bit();
+                const char *filename_imgchar = filename_imgqb.data();
+
+                savedata(depth_map_path, depth_map);
+                cv::imwrite(filename_imgchar, color_image);
+
+                // Run python script
+                QProcess py;
+                QStringList pyarg;
+
+                pyarg << "/home/cpii/Desktop/Textiles/main.py";
+                py.startDetached("python", pyarg);
+
+                QThread::msleep(4000);
+
+                // Load result from python
+                QString filename_segmentation_drawing = QString(tmp_path + "segmentation_stage.png");
+                QByteArray filename_segmentation_drawingqb = filename_segmentation_drawing.toLocal8Bit();
+                const char *filename_segmentation_drawingchar = filename_segmentation_drawingqb.data();
+                segmentation_drawing = cv::imread(filename_segmentation_drawingchar);
+
+                QString filename_clustering_drawing = QString(tmp_path + "clustering_stage_image.png");
+                QByteArray filename_clustering_drawingqb = filename_clustering_drawing.toLocal8Bit();
+                const char *filename_clustering_drawingchar = filename_clustering_drawingqb.data();
+                clustering_drawing = cv::imread(filename_clustering_drawingchar);
+
+                QString filename_pick_and_place_drawing = QString(tmp_path + "pick_and_place_stage.png");
+                QByteArray filename_pick_and_place_drawingqb = filename_pick_and_place_drawing.toLocal8Bit();
+                const char *filename_pick_and_place_drawingchar = filename_pick_and_place_drawingqb.data();
+                pick_and_place_drawing = cv::imread(filename_pick_and_place_drawingchar);
+
+                QString filename_place_place_point = QString(tmp_path + "/pick_place_point.txt");
+                std::vector<float> pick_place_point;
+                loaddata(filename_place_place_point.toStdString(), pick_place_point);
+                grasp_point.x = pick_place_point[0];
+                grasp_point.y = pick_place_point[1];
+                release_point.x = pick_place_point[2];
+                release_point.y = pick_place_point[3];
+
+
+                //                // C++ version of Textiles
+
+                //                Textiles = std::make_shared<TEXTILES>();
+
+                //                cv::Mat img_src = cv::imread("/home/cpii/Desktop/Textiles/data3/image.jpg");
+                //                std::vector<float> depth_vector;
+                //                QString path = "/home/cpii/Desktop/Textiles/data3/depth_mapc.txt";
+                //                QFile filed(path);
+                //                if(!filed.open(QIODevice::ReadOnly)) {
+                //                    qDebug() << "Cannot open file for reading:" << qPrintable(filed.errorString());
+                //                    return;
+                //                }
+                //                QTextStream in(&filed);
+                //                while(!in.atEnd()) {
+                //                    QString line = in.readLine();
+                //                    depth_vector.push_back(line.toFloat());
+                //                }
+                //                filed.close();
+                //                cv::Mat depth_map = cv::Mat(warped_image_resize.width, warped_image_resize.height, CV_32FC1);
+                //                memcpy(depth_map.data, depth_vector.data(), depth_vector.size()*sizeof(float));
+
+                //                // Garment Segmentation Stage
+                //                cv::Mat mask = Textiles->Segmentation_background_subtraction(img_src);
+                //                std::vector<cv::Point> approximated_polygon = Textiles->Segmentation_compute_approximated_polygon(mask);
+                //                segmentation_drawing = Textiles->draw_segmentation_stage(img_src, mask, approximated_polygon);
+                //                //cv::imshow("segmentation_drawing", segmentation_drawing);
+                //                //cv::waitKey(-1);
+
+                //                // Garment Depth Map Clustering Stage
+                //                cv::Mat preprocessed_depth_image = Textiles->DepthMapClustering_preprocess(depth_map, mask);
+                //                cv::Mat labeled_image = Textiles->DepthMapClustering_cluster_similar_regions(preprocessed_depth_image);
+                //                clustering_drawing = Textiles->draw_clustering_stage(img_src, labeled_image);
+                //                cv::imshow("clustering_drawing", clustering_drawing);
+                //                cv::waitKey(-1);
+
+                //                // Garment Pick and Place Points Stage
+                //                std::vector<cv::Point> unfold_paths = Textiles->PickandPlacePoints_calculate_unfold_paths(labeled_image, approximated_polygon);
+                //                std::vector<int> bumpiness = Textiles->PickandPlacePoints_calculate_bumpiness(labeled_image, unfold_paths);
+                //                std::vector<cv::Point> PickandPlace_point = Textiles->PickandPlacePoints_calculate_pick_and_place_points(labeled_image, unfold_paths, bumpiness);
+
+
+                // Check if out of range
+                if (((static_cast<double>(grasp_point.x) / imageWidth > 0.6
+                      && static_cast<double>(grasp_point.y) / imageHeight > 0.6 )
+                     || (sqrt(pow((static_cast<double>(grasp_point.x) / imageWidth - 0.83), 2) + pow((static_cast<double>(grasp_point.y) / imageHeight - 0.83), 2)) > 0.7745))
+                     || ((static_cast<double>(release_point.x) / imageWidth > 0.6
+                        && static_cast<double>(release_point.y) / imageHeight > 0.6 )
+                     || (sqrt(pow((static_cast<double>(release_point.x) / imageWidth - 0.83), 2) + pow((static_cast<double>(release_point.y) / imageHeight - 0.83), 2)) > 0.7745))
+                     || (grasp_point.x > imageWidth || grasp_point.y > imageHeight || release_point.x > imageWidth || release_point.y > imageHeight)
+                     || (grasp_point.x < 0 || grasp_point.y < 0 || release_point.x < 0 || release_point.y < 0))
+                { // Filter out the robot arm and markers
+                    qDebug() << "Exceeds limit";
+
+                    // pull the garment back to the center of the table
+                    cv::Mat src_gray;
+                    cv::cvtColor( warped_image, src_gray, cv::COLOR_BGR2GRAY );
+                    cv::blur( src_gray, src_gray, cv::Size(3,3) );
+                    cv::Mat canny_output;
+                    cv::Canny( src_gray, canny_output, thresh, thresh*1.2 );
+                    std::vector<cv::Vec4i> hierarchy;
+                    cv::Size sz = src_gray.size();
+                    imageWidth = sz.width;
+                    imageHeight = sz.height;
+
+                    cv::findContours( canny_output, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE );
+                    grasp_point.x = imageWidth;
+                    grasp_point.y = imageHeight;
+                    for( size_t i = 0; i< contours.size(); i++ ){
+                        for (size_t j = 0; j < contours[i].size(); j++){
+                            if(sqrt(pow((static_cast<double>(contours[i][j].x) / imageWidth * 0.5), 2) + pow((static_cast<double>(contours[i][j].y) / imageHeight * 0.5), 2)) <
+                                    sqrt(pow((static_cast<double>(grasp_point.x) / imageWidth * 0.5), 2) + pow((static_cast<double>(grasp_point.y) / imageHeight * 0.5), 2))){
+                                grasp_point.x = contours[i][j].x;
+                                grasp_point.y = contours[i][j].y;
+                            }
+                        }
+                    }
+                    float a = grasp_point.x-static_cast<double>(imageWidth) * 0.5;
+                    float b = grasp_point.y-static_cast<double>(imageHeight) * 0.5;
+                    float c = release_point.x-static_cast<double>(imageWidth) * 0.5;
+                    float d = release_point.y-static_cast<double>(imageHeight) * 0.5;
+                    if((a<=0 && b<=0 && c>=0 && d>=0) || (a<=0 && b>=0 && c>=0 && d<=0) || (a>=0 && b<=0 && c<=0 && d>=0) || (a>=0 && b>=0 && c<=0 && d<=0)){
+                        release_point.x = static_cast<double>(imageWidth) - release_point.x;
+                        release_point.y = static_cast<double>(imageHeight) - release_point.y;
+                    } else {
+                        release_point.x = static_cast<double>(imageWidth) * 0.5;
+                        release_point.y = static_cast<double>(imageHeight) * 0.5;
+                    }
+
+                    //clustering_drawing.copyTo(pick_and_place_drawing);
+                    cv::arrowedLine(pick_and_place_drawing, grasp_point, release_point, (255, 0, 0), 5, cv::LINE_AA, 0, 0.25);
+                }
+
+
+                // Draw
+                gLock.lockForWrite();
+                gInvWarpImage = QImage((uchar*) OriginalCoordinates.data, OriginalCoordinates.cols, OriginalCoordinates.rows, OriginalCoordinates.step, QImage::Format_BGR888).copy();
+                gTexiltes_segmentation_drawing = QImage((uchar*) segmentation_drawing.data, segmentation_drawing.cols, segmentation_drawing.rows, segmentation_drawing.step, QImage::Format_BGR888).copy();
+                gTexiltes_clustering_drawing = QImage((uchar*) clustering_drawing.data, clustering_drawing.cols, clustering_drawing.rows, clustering_drawing.step, QImage::Format_BGR888).copy();
+                gTexiltes_pick_and_place_drawing = QImage((uchar*) pick_and_place_drawing.data, pick_and_place_drawing.cols, pick_and_place_drawing.rows, pick_and_place_drawing.step, QImage::Format_BGR888).copy();
+                gLock.unlock();
+                emit glUpdateRequest();
+
+
+                // 2D point to 3D point
+                cv::Point2f warpedpg = cv::Point2f(grasp_point.x/static_cast<float>(imageWidth)*warped_image_size.width, grasp_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+                cv::Point3f homogeneousg = WarpMatrix.inv() * warpedpg;
+                float depth_pointg[2] = {0}, color_pointg[2] = {homogeneousg.x/homogeneousg.z, homogeneousg.y/homogeneousg.z};
+                rs2_project_color_pixel_to_depth_pixel(depth_pointg, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointg);
+
+                offset[0] = 0; offset[1] = 0;
+                graspx = int(depth_pointg[0]);
+                graspy = int(depth_pointg[1]);
+                mCalAveragePoint = true;
+                avgHeight.clear();
+                acount = 0;
+                while (acount<30){
+                    Sleeper::msleep(200);
+                }
+                mCalAveragePoint = false;
+                grasp[0] = grasppt.x();
+                grasp[1] = grasppt.y();
+                grasp[2] = gripper_length + grasppt.z();
+                if(grasp[2] < mTableHeight){
+                    grasp[2] = mTableHeight;
+                }
+
+                warpedpg = cv::Point2f(release_point.x/static_cast<float>(imageWidth)*warped_image_size.width, release_point.y/static_cast<float>(imageHeight)*warped_image_size.height);
+                homogeneousg = WarpMatrix.inv() * warpedpg;
+                float depth_pointg2[2] = {0}, color_pointg2[2] = {homogeneousg.x/homogeneousg.z, homogeneousg.y/homogeneousg.z};
+                rs2_project_color_pixel_to_depth_pixel(depth_pointg2, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_pointg2);
+
+                offset[0] = 0; offset[1] = 0;
+                graspx = int(depth_pointg2[0]);
+                graspy = int(depth_pointg2[1]);
+                mCalAveragePoint = true;
+                avgHeight.clear();
+                acount = 0;
+                while (acount<30){
+                    Sleeper::msleep(200);
+                }
+                mCalAveragePoint = false;
+                release[0] = grasppt.x();
+                release[1] = grasppt.y();
+                release[2] = grasp[2];
+
+                float Angle2Pi = 1.0/180.0*PI;
+                float tangent = atan((grasp_point.y - release_point.y) / (release_point.x - grasp_point.x));
+                Rz = float(tangent) - (45.0*Angle2Pi);
+                if(tangent >= 0 && tangent <= 45.0*Angle2Pi){
+                    Rz = float(-tangent) - (45.0*Angle2Pi);
+                } else {
+                    Rz = float(-tangent) + (135.0*Angle2Pi);
+                }
+
+                // Pick and place task
+                // Write the unfold plan file
+                QString filename = "/home/cpii/projects/scripts/unfold.sh";
+                QFile file(filename);
+
+                if (file.open(QIODevice::ReadWrite)) {
+                    file.setPermissions(QFileDevice::Permissions(1909));
+                    QTextStream stream(&file);
+                    stream << "#!/bin/bash" << "\n"
+                           << "\n"
+                           << "cd" << "\n"
+                           << "\n"
+                           << "source /opt/ros/foxy/setup.bash" << "\n"
+                           << "\n"
+                           << "source ~/ws_moveit2/install/setup.bash" << "\n"
+                           << "\n"
+                           << "source ~/tm_robot_gripper/install/setup.bash" << "\n"
+                           << "\n"
+                           << "cd tm_robot_gripper/" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\"" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.1 <<", -3.14, 0, "<< Rz <<"], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 2" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2] <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 1" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << grasp[0] <<", " << grasp[1] <<", " << grasp[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 4, positions: [" << release[0] <<", " << release[1] <<", " << release[2] <<", -3.14, 0, "<< Rz <<"], velocity: 0.7, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 2" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_io tmr_msgs/srv/SetIO \"{module: 1, type: 1, pin: 0, state: 1}\""<< "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [" << release[0] <<", " << release[1] <<", " << release[2]+0.05 <<", -3.14, 0, "<< Rz <<"], velocity: 1, acc_time: 0.3, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "ros2 service call /tmr/set_positions tmr_msgs/srv/SetPositions \"{motion_type: 2, positions: [0.1, -0.4, 0.4, -3.14, 0, 0], velocity: 2, acc_time: 0.5, blend_percentage: 0, fine_goal: 0}\"" << "\n"
+                           << "\n"
+                           << "sleep 4" << "\n"
+                           << "\n";
+                } else {
+                    qDebug("file open error");
+                }
+                file.close();
+
+                QProcess unfold;
+                QStringList unfoldarg;
+
+                unfoldarg << "/home/cpii/projects/scripts/unfold.sh";
+
+                unfold.start("xterm", unfoldarg);
+
+                constexpr int timeout_count = 60000; //60000 mseconds
+                if ( unfold.waitForFinished(timeout_count)) {
+                    qDebug() << QString("\033[1;36m[%1] Robot action finished\033[0m")
+                                .arg(QDateTime::currentDateTime().toString("hh:mm:ss dd-MM-yyyy"))
+                                .toUtf8().data();
+                }
+
+                // Detect if unfolded
+                gCamimage.copyTo(Src);
+                cv::warpPerspective(Src, warped_image, WarpMatrix, warped_image_size); // do perspective transformation
+                cv::resize(warped_image, inv_warp_image, warped_image_size);
+                cv::warpPerspective(inv_warp_image, OriginalCoordinates, WarpMatrix.inv(), cv::Size(srcw, srch)); // do perspective transformation
+                cv::resize(warped_image, warped_image, warped_image_resize);
+                warped_image = background - warped_image;
+                warped_image = ~warped_image;
+
+                float avg_garment_height = 0, max_height_after = 0;
+                int garment_area_after = 0;
+                std::vector<float> after_tableheight(warped_image.cols * warped_image.rows);
+                for(int i=0; i<warped_image.rows; i++){
+                    for(int j=0; j<warped_image.cols; j++){
+                        auto PT_RGB = warped_image.at<cv::Vec3b>(i, j);
+                        int id = i*warped_image.cols+j;
+                        if((i >= (0.6*(float)warped_image.rows) && j >= (0.6*(float)warped_image.cols))
+                                || (PT_RGB[0] >= uThres && PT_RGB[1] >= uThres && PT_RGB[2] >= uThres)){
+                            after_tableheight[id] = 0.0;
+                        } else {
+                            cv::Point2f warpedp = cv::Point2f(j/static_cast<float>(imageWidth)*warped_image_size.width, i/static_cast<float>(imageHeight)*warped_image_size.height);
+                            cv::Point3f homogeneous = WarpMatrix.inv() * warpedp;
+                            float depth_point[2] = {0}, color_point[2] = {homogeneous.x/homogeneous.z, homogeneous.y/homogeneous.z};
+                            rs2_project_color_pixel_to_depth_pixel(depth_point, reinterpret_cast<const uint16_t*>(depth.get_data()), depth_scale, 0.1, 10.0, &depth_i, &color_i, &c2d_e, &d2c_e, color_point);
+                            int P = int(depth_point[0])*depthh + depthh-int(depth_point[1]);
+                            if(avgHeight.at(P) > 0.0 && avgHeight.at(P) < 0.20){
+                                after_tableheight[id] = (float)avgHeight.at(P);
+                                avg_garment_height += after_tableheight[id];
+                                garment_area_after++;
+                            } else {
+                                after_tableheight[id] = 0.0;
+                            }
+                        }
+                    }
+                }
+                avg_garment_height /= garment_area_after;
+                for(int i=0; i<after_tableheight.size(); i++){
+                    if(after_tableheight[i] > max_height_after && after_tableheight[i]-0.05 < avg_garment_height){
+                        max_height_after = after_tableheight[i];
+                    }
+                }
+
+                std::vector<std::vector<cv::Point>> squares;
+                cv::Mat sqr_img;
+                warped_image.copyTo(sqr_img);
+                findSquares(sqr_img, squares);
+
+                cv::polylines(sqr_img, squares, true, cv::Scalar(0, 255, 0), 3, cv::LINE_AA);
+
+                gLock.lockForWrite();
+                gTexiltes_segmentation_drawing = QImage((uchar*) sqr_img.data, sqr_img.cols, sqr_img.rows, sqr_img.step, QImage::Format_BGR888).copy();
+                gLock.unlock();
+                emit glUpdateRequest();
+
+                qDebug() << "sqr size: " << squares.size();
+                qDebug() << "max height: " << max_height_after;
+
+                if (max_height_after < 0.04 && squares.size() > 0) {
+                    done = true;
+                    qDebug() << "\033[1;31mGarment is unfolded\033[0m";
+                }
+            }
+        } catch (const std::exception &e) {
+            auto &&msg = torch::GetExceptionString(e);
+            qWarning() << msg.c_str();
+        } catch (...) {
+            qCritical() << "GG";
+        }
+    });
+}
 
 void LP_Plugin_Garment_Manipulation::adjustHeight(double &in, const double &min)
 {
@@ -10591,7 +11355,7 @@ void LP_Plugin_Garment_Manipulation::adjustHeight(double &in, const double &min)
 void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSurface *surf, QOpenGLFramebufferObject *fbo, const LP_RendererCam &cam, const QVariant &options)
 {
     Q_UNUSED(surf)  //Mostly not used within a Functional.
-//    Q_UNUSED(options)   //Not used in this functional.
+    //    Q_UNUSED(options)   //Not used in this functional.
 
     if(!gQuit){
 
@@ -10600,48 +11364,63 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
         }
 
         QMatrix4x4 view = cam->ViewMatrix(),
-                   proj = cam->ProjectionMatrix();
+                proj = cam->ProjectionMatrix();
 
         static std::vector<QVector3D> quad1 =
-                                      {QVector3D( 0.0f, 0.0f, 0.0f),
-                                       QVector3D( 0.0f, 2.5f, 0.0f),
-                                       QVector3D(-4.0f, 2.5f, 0.0f),
-                                       QVector3D(-4.0f, 0.0f, 0.0f)};
+        {QVector3D( 0.0f, 0.0f, 0.0f),
+         QVector3D( 0.0f, 2.5f, 0.0f),
+         QVector3D(-4.0f, 2.5f, 0.0f),
+         QVector3D(-4.0f, 0.0f, 0.0f)};
 
         static std::vector<QVector3D> quad2 =
-                                      {QVector3D( 0.0f,-3.0f, 0.0f),
-                                       QVector3D( 0.0f, 0.0f, 0.0f),
-                                       QVector3D(-3.0f, 0.0f, 0.0f),
-                                       QVector3D(-3.0f,-3.0f, 0.0f)};
+        {QVector3D( 0.0f,-3.0f, 0.0f),
+         QVector3D( 0.0f, 0.0f, 0.0f),
+         QVector3D(-3.0f, 0.0f, 0.0f),
+         QVector3D(-3.0f,-3.0f, 0.0f)};
 
         static std::vector<QVector3D> quad3 =
-                                      {QVector3D( 3.0f,-3.0f, 0.0f),
-                                       QVector3D( 3.0f, 0.0f, 0.0f),
-                                       QVector3D( 0.0f, 0.0f, 0.0f),
-                                       QVector3D( 0.0f,-3.0f, 0.0f)};
+        {QVector3D( 3.0f,-3.0f, 0.0f),
+         QVector3D( 3.0f, 0.0f, 0.0f),
+         QVector3D( 0.0f, 0.0f, 0.0f),
+         QVector3D( 0.0f,-3.0f, 0.0f)};
 
         static std::vector<QVector3D> quad4 =
-                                      {QVector3D( 4.0f, 0.0f, 0.0f),
-                                       QVector3D( 4.0f, 2.5f, 0.0f),
-                                       QVector3D( 0.0f, 2.5f, 0.0f),
-                                       QVector3D( 0.0f, 0.0f, 0.0f)};
+        {QVector3D( 4.0f, 0.0f, 0.0f),
+         QVector3D( 4.0f, 2.5f, 0.0f),
+         QVector3D( 0.0f, 2.5f, 0.0f),
+         QVector3D( 0.0f, 0.0f, 0.0f)};
 
         static std::vector<QVector3D> quad5 =
-                                      {QVector3D( 1.5f,-6.0f, 0.0f),
-                                       QVector3D( 1.5f,-3.0f, 0.0f),
-                                       QVector3D(-1.5f,-3.0f, 0.0f),
-                                       QVector3D(-1.5f,-6.0f, 0.0f)};
+        {QVector3D( 1.5f,-6.0f, 0.0f),
+         QVector3D( 1.5f,-3.0f, 0.0f),
+         QVector3D(-1.5f,-3.0f, 0.0f),
+         QVector3D(-1.5f,-6.0f, 0.0f)};
+
+        static std::vector<QVector3D> Texiltes_segmentation_drawing =
+        {QVector3D(-1.5f,-3.0f, 0.0f),
+         QVector3D(-1.5f, 0.0f, 0.0f),
+         QVector3D(-4.5f, 0.0f, 0.0f),
+         QVector3D(-4.5f,-3.0f, 0.0f)};
+
+        static std::vector<QVector3D> Texiltes_clustering_drawing =
+        {QVector3D( 1.5f,-3.0f, 0.0f),
+         QVector3D( 1.5f, 0.0f, 0.0f),
+         QVector3D(-1.5f, 0.0f, 0.0f),
+         QVector3D(-1.5f,-3.0f, 0.0f)};
+
+        static std::vector<QVector3D> Texiltes_pick_and_place_drawing =
+        {QVector3D( 4.5f,-3.0f, 0.0f),
+         QVector3D( 4.5f, 0.0f, 0.0f),
+         QVector3D( 1.5f, 0.0f, 0.0f),
+         QVector3D( 1.5f,-3.0f, 0.0f)};
 
         static std::vector<QVector2D> tex =
-                                      {QVector2D( 1.0f, 0.0f),
-                                       QVector2D( 1.0f, 1.0f),
-                                       QVector2D( 0.0f, 1.0f),
-                                       QVector2D( 0.0f, 0.0f)};
-
-
+        {QVector2D( 1.0f, 0.0f),
+         QVector2D( 1.0f, 1.0f),
+         QVector2D( 0.0f, 1.0f),
+         QVector2D( 0.0f, 0.0f)};
 
         auto f = ctx->extraFunctions();
-
 
         fbo->bind();
         mProgram_L->bind();
@@ -10664,7 +11443,6 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 
         texture1.release();
 
-
         if (gStopFindWorkspace){
             if(!gWarpedImage.isNull()){
                 mProgram_L->setAttributeArray("a_pos", quad2.data());
@@ -10674,7 +11452,7 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 
                 if ( !texture2.create()){
                     qDebug() << "GG";
-                    }
+                }
 
                 texture2.bind();
 
@@ -10691,7 +11469,7 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 
                 if ( !texture3.create()){
                     qDebug() << "GG";
-                    }
+                }
 
                 texture3.bind();
 
@@ -10708,7 +11486,7 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 
                 if ( !texture4.create()){
                     qDebug() << "GG";
-                    }
+                }
 
                 texture4.bind();
 
@@ -10725,7 +11503,7 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 
                 if ( !texture5.create()){
                     qDebug() << "GG";
-                    }
+                }
 
                 texture5.bind();
 
@@ -10733,8 +11511,58 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 
                 texture5.release();
             }
-        }
 
+            if(!gTexiltes_segmentation_drawing.isNull()){
+                mProgram_L->setAttributeArray("a_pos", Texiltes_segmentation_drawing.data());
+                gLock.lockForRead();
+                QOpenGLTexture texture_segmentation(gTexiltes_segmentation_drawing.mirrored());
+                gLock.unlock();
+
+                if ( !texture_segmentation.create()){
+                    qDebug() << "GG";
+                }
+
+                texture_segmentation.bind();
+
+                f->glDrawArrays(GL_QUADS, 0, 4);
+
+                texture_segmentation.release();
+            }
+
+            if(!gTexiltes_clustering_drawing.isNull()){
+                mProgram_L->setAttributeArray("a_pos", Texiltes_clustering_drawing.data());
+                gLock.lockForRead();
+                QOpenGLTexture texture_clustering(gTexiltes_clustering_drawing.mirrored());
+                gLock.unlock();
+
+                if ( !texture_clustering.create()){
+                    qDebug() << "GG";
+                }
+
+                texture_clustering.bind();
+
+                f->glDrawArrays(GL_QUADS, 0, 4);
+
+                texture_clustering.release();
+            }
+
+            if(!gTexiltes_pick_and_place_drawing.isNull()){
+                mProgram_L->setAttributeArray("a_pos", Texiltes_pick_and_place_drawing.data());
+                gLock.lockForRead();
+                QOpenGLTexture texture_pick_place(gTexiltes_pick_and_place_drawing.mirrored());
+                gLock.unlock();
+
+                if ( !texture_pick_place.create()){
+                    qDebug() << "GG";
+                }
+
+                texture_pick_place.bind();
+
+                f->glDrawArrays(GL_QUADS, 0, 4);
+
+                texture_pick_place.release();
+            }
+        }
 
         mProgram_L->disableAttributeArray("a_pos");
         mProgram_L->disableAttributeArray("a_tex");
@@ -10746,7 +11574,7 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_L(QOpenGLContext *ctx, QSu
 void LP_Plugin_Garment_Manipulation::FunctionalRender_R(QOpenGLContext *ctx, QSurface *surf, QOpenGLFramebufferObject *fbo, const LP_RendererCam &cam, const QVariant &options)
 {
     Q_UNUSED(surf)  //Mostly not used within a Functional.
-//    Q_UNUSED(options)   //Not used in this functional.
+    //    Q_UNUSED(options)   //Not used in this functional.
 
     if(!gQuit){
 
@@ -10755,7 +11583,7 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_R(QOpenGLContext *ctx, QSu
         }
 
         QMatrix4x4 view = cam->ViewMatrix(),
-                   proj = cam->ProjectionMatrix();
+                proj = cam->ProjectionMatrix();
 
         auto f = ctx->extraFunctions();
 
@@ -10832,15 +11660,15 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_R(QOpenGLContext *ctx, QSu
 
         mProgram_R->setUniformValue("v4_color", QVector4D(0.f, 0.f, 0.f, 1.f));
 
-//        std::vector<QVector3D> tmpPC;
-//        for(int i=0; i<100; i++){
-//            for(int j=0; j<50; j++){
-//                tmpPC.emplace_back(QVector3D(i*0.1f, j*0.1, 0.0f));
-//            }
-//        }
-//        mProgram_R->setUniformValue("f_pointSize", 1.0f);
-//        mProgram_R->setAttributeArray("a_pos", tmpPC.data());
-//        f->glDrawArrays(GL_POINTS, 0, tmpPC.size());
+        //        std::vector<QVector3D> tmpPC;
+        //        for(int i=0; i<100; i++){
+        //            for(int j=0; j<50; j++){
+        //                tmpPC.emplace_back(QVector3D(i*0.1f, j*0.1, 0.0f));
+        //            }
+        //        }
+        //        mProgram_R->setUniformValue("f_pointSize", 1.0f);
+        //        mProgram_R->setAttributeArray("a_pos", tmpPC.data());
+        //        f->glDrawArrays(GL_POINTS, 0, tmpPC.size());
 
 
         mProgram_R->disableAttributeArray("a_pos");
@@ -10854,44 +11682,44 @@ void LP_Plugin_Garment_Manipulation::FunctionalRender_R(QOpenGLContext *ctx, QSu
 
 void LP_Plugin_Garment_Manipulation::initializeGL_L()
 {
-        std::string vsh, fsh;
+    std::string vsh, fsh;
 
-            vsh =
-                "attribute vec3 a_pos;\n"       //The position of a point in 3D that used in FunctionRender()
-                "attribute vec2 a_tex;\n"
-                "uniform mat4 m4_mvp;\n"        //The Model-View-Matrix
-                "varying vec2 tex;\n"
-                "void main(){\n"
-                "   tex = a_tex;\n"
-                "   gl_Position = m4_mvp * vec4(a_pos, 1.0);\n" //Output the OpenGL position
-                "   gl_PointSize = 10.0;\n"
-                "}";
-            fsh =
-                "uniform sampler2D u_tex;\n"    //Defined the point color variable that will be set in FunctionRender()
-                "varying vec2 tex;\n"
-                "void main(){\n"
-                "   vec4 v4_color = texture2D(u_tex, tex);\n"
-                "   gl_FragColor = v4_color;\n" //Output the fragment color;
-                "}";
+    vsh =
+            "attribute vec3 a_pos;\n"       //The position of a point in 3D that used in FunctionRender()
+            "attribute vec2 a_tex;\n"
+            "uniform mat4 m4_mvp;\n"        //The Model-View-Matrix
+            "varying vec2 tex;\n"
+            "void main(){\n"
+            "   tex = a_tex;\n"
+            "   gl_Position = m4_mvp * vec4(a_pos, 1.0);\n" //Output the OpenGL position
+            "   gl_PointSize = 10.0;\n"
+            "}";
+    fsh =
+            "uniform sampler2D u_tex;\n"    //Defined the point color variable that will be set in FunctionRender()
+            "varying vec2 tex;\n"
+            "void main(){\n"
+            "   vec4 v4_color = texture2D(u_tex, tex);\n"
+            "   gl_FragColor = v4_color;\n" //Output the fragment color;
+            "}";
 
-        auto prog = new QOpenGLShaderProgram;   //Intialize the Shader with the above GLSL codes
-        prog->addShaderFromSourceCode(QOpenGLShader::Vertex,vsh.c_str());
-        prog->addShaderFromSourceCode(QOpenGLShader::Fragment,fsh.data());
-        if (!prog->create() || !prog->link()){  //Check whether the GLSL codes are valid
-            qDebug() << prog->log();
-            return;
-        }
+    auto prog = new QOpenGLShaderProgram;   //Intialize the Shader with the above GLSL codes
+    prog->addShaderFromSourceCode(QOpenGLShader::Vertex,vsh.c_str());
+    prog->addShaderFromSourceCode(QOpenGLShader::Fragment,fsh.data());
+    if (!prog->create() || !prog->link()){  //Check whether the GLSL codes are valid
+        qDebug() << prog->log();
+        return;
+    }
 
-        mProgram_L = prog;            //If everything is fine, assign to the member variable
+    mProgram_L = prog;            //If everything is fine, assign to the member variable
 
-        mInitialized_L = true;
+    mInitialized_L = true;
 }
 
 void LP_Plugin_Garment_Manipulation::initializeGL_R()
 {
     std::string vsh, fsh;
 
-        vsh =
+    vsh =
             "attribute vec3 a_pos;\n"       //The position of a point in 3D that used in FunctionRender()
             "attribute vec2 a_tex;\n"
             "uniform mat4 m4_mvp;\n"        //The Model-View-Matrix
@@ -10902,7 +11730,7 @@ void LP_Plugin_Garment_Manipulation::initializeGL_R()
             "   gl_PointSize = f_pointSize; \n"
             "   tex = a_tex;\n"
             "}";
-        fsh =
+    fsh =
             "uniform sampler2D u_tex;\n"    //Defined the point color variable that will be set in FunctionRender()
             "uniform vec4 v4_color;\n"
             "varying vec2 tex;\n"
@@ -10927,7 +11755,7 @@ void LP_Plugin_Garment_Manipulation::initializeGL_R()
 
 void LP_Plugin_Garment_Manipulation::timerEvent(QTimerEvent *event)
 {
-//    Q_UNUSED(event);
+    //    Q_UNUSED(event);
     qDebug() << QString("\033[1;96m[Status] \033[1;32mSaved / \033[1;33mUseless / \033[1;96mReset : \033[1;32m%1 /\033[1;33m%2 /\033[1;96m%3 \033[0m")
                 .arg(datanumber, 5, 10, QChar(' '))
                 .arg(useless_data, 3, 10, QChar(' '))
@@ -10984,7 +11812,7 @@ bool filter_slider_ui::is_all_integers(const rs2::option_range& range)
     };
 
     return is_integer(range.min) && is_integer(range.max) &&
-        is_integer(range.def) && is_integer(range.step);
+            is_integer(range.def) && is_integer(range.step);
 }
 
 /**

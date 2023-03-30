@@ -12,11 +12,16 @@ QMAKE_POST_LINK=$(MAKE) install
 #DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0
 
 SOURCES += \
-    lp_plugin_garment_manipulation.cpp
+    LPAP.cpp \
+    gym_arm.cpp \
+    lp_plugin_garment_manipulation.cpp \
+    textiles.cpp
 
 HEADERS += \
     LP_Plugin_Garment_Manipulation_global.h \
-    lp_plugin_garment_manipulation.h
+    gym_arm.h \
+    lp_plugin_garment_manipulation.h \
+    textiles.h
 
 # Default rules for deployment.
 unix {
@@ -66,12 +71,25 @@ win32:CONFIG(release, debug|release): {
         -lopencv_imgproc \
         -lopencv_imgcodecs \
         -lopencv_dnn \
-        -lopencv_aruco
+        -lopencv_aruco \
+        -lopencv_text \
+        -lopencv_photo
 
 INCLUDEPATH += $$PWD/../../../opencv/opencv-4.5.2/install/include/opencv4
 DEPENDPATH += $$PWD/../../../opencv/opencv-4.5.2/install/include/opencv4
 }
 
+INCLUDEPATH += $$PWD/../../../opencv/opencv_contrib-4.5.2/modules/text/include/opencv2
+DEPENDPATH += $$PWD/../../../opencv/opencv_contrib-4.5.2/modules/text/include/opencv2
+
+INCLUDEPATH += $$PWD/../../tesseract-main/include
+DEPENDPATH += $$PWD/../../tesseract-main/include
+
+INCLUDEPATH += $$PWD/../../leptonica-1.82.0/src
+DEPENDPATH += $$PWD/../../leptonica-1.82.0/src
+
+INCLUDEPATH += $$PWD/../../leptonica-1.82.0/build/src
+DEPENDPATH += $$PWD/../../leptonica-1.82.0/build/src
 
 unix:!macx: LIBS += -L$$PWD/../../../librealsense-master/build/ -lrealsense2
 
@@ -80,15 +98,6 @@ DEPENDPATH += $$PWD/../../../librealsense-master/include/librealsense2
 
 INCLUDEPATH += $$PWD/../../../librealsense-master/examples
 DEPENDPATH += $$PWD/../../../librealsense-master/examples
-
-unix:!macx: LIBS += -L$$PWD/../../../bullet3/build_cmake/install/lib/ \
-    -lBulletSoftBody \
-    -lBulletCollision \
-    -lBulletDynamics \
-    -lBulletRobotics
-
-INCLUDEPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
-DEPENDPATH += $$PWD/../../../bullet3/build_cmake/install/include/bullet
 
 INCLUDEPATH += $$PWD/../../../darknet-master/include/
 DEPENDPATH += $$PWD/../../../darknet-master/include/
@@ -105,5 +114,5 @@ DEPENDPATH += $$PWD/../../../tensorboard_logger-master/include
 INCLUDEPATH += $$PWD/../../../tensorboard_logger-master/build
 DEPENDPATH += $$PWD/../../../tensorboard_logger-master/build
 
-unix:!macx: LIBS += -L$$PWD/../../../tensorboard_logger-master/build \
-   -ltensorboard_logger
+#unix:!macx: LIBS += -L$$PWD/../../../tensorboard_logger-master/build \
+#   -ltensorboard_logger

@@ -45,6 +45,8 @@
 #include <QThread>
 #include <QPushButton>
 
+#include "textiles.h"
+
 class QLabel;
 class LP_ObjectImpl;
 class QOpenGLShaderProgram;
@@ -85,6 +87,7 @@ public slots:
         void FunctionalRender_L(QOpenGLContext *ctx, QSurface *surf, QOpenGLFramebufferObject *fbo, const LP_RendererCam &cam, const QVariant &options) override;
         void FunctionalRender_R(QOpenGLContext *ctx, QSurface *surf, QOpenGLFramebufferObject *fbo, const LP_RendererCam &cam, const QVariant &options) override;
         void calibrate();
+        void create_paths();
         void update_data(rs2::frame_queue& data, rs2::frame& colorized_depth, rs2::points& points, rs2::pointcloud& pc, rs2::colorizer& color_map);
         void resetRViz();
         bool resetRobotPosition();
@@ -95,6 +98,8 @@ public slots:
         void Reinforcement_Learning_1();
         void Reinforcement_Learning_2();
         void Train_rod();
+        void RunLPAP();
+        void RunTEXTILES();
         void trans_old_data(int datasize, QString location, QString savepath);
         void findgrasp(std::vector<double> &grasp, cv::Point &grasp_point, float &Rz, std::vector<cv::Vec4i> hierarchy);
         void findrelease(std::vector<double> &release, cv::Point &release_point, cv::Point grasp_point);
@@ -112,6 +117,7 @@ public slots:
         void findSquares( const cv::Mat& image, std::vector<std::vector<cv::Point>>& squares );
         void findLines( const cv::Mat image);
         void getIndex(std::vector<float> v, float K, int& index);
+        void getDataRewards();
 
 private:
         bool mInitialized_L = false;
@@ -121,6 +127,8 @@ private:
         bool mRunReinforcementLearning1 = false;
         bool mRunReinforcementLearning2 = false;
         bool mRunTrainRod = false;
+        bool mRunLPAP = false;
+        bool mRunTEXTILES = false;
         bool mGenerateData = false;
         bool mGetPlacePoint = false;
         bool mCalAveragePoint = false;
@@ -131,7 +139,7 @@ private:
         bool gFoundBackground = false;
         bool mShowInTableCoordinateFrame = false;
         double mTableHeight = 0.0;
-        bool manual_mode = true;
+        bool manual_mode = false;
         bool use_filter = true;
 
         std::shared_ptr<QWidget> mWidget;
@@ -141,6 +149,8 @@ private:
         QPushButton *mButton1 = nullptr;
         QPushButton *mButton2 = nullptr;
         QPushButton *mButton3 = nullptr;
+        QPushButton *mButton4 = nullptr;
+        QPushButton *mButton5 = nullptr;
         QOpenGLShaderProgram *mProgram_L = nullptr,
                              *mProgram_R = nullptr;
 
@@ -204,6 +214,7 @@ private:
         QVector2D place_pointxy;
 
         std::shared_ptr<Detector> mDetector;
+        std::shared_ptr<TEXTILES> Textiles;
 
         void adjustHeight(double &in, const double &min);
         /**
