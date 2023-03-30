@@ -1,0 +1,13 @@
+darknet
+c10
+c10_cuda
+torch
+torch_cpu
+torch_cuda
+torch_cuda_cu
+torch_cuda_cpp
+protobuf
+protobuf-lite
+protoc
+tesseract
+tensorboard_logger
